@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# WhatsApp auth session (contains login credentials — never commit)
+auth/
+
+# Environment variables
+.env
+
+# Pending approvals data (runtime state)
+data/pending_approvals.json
+
+# Logs
+*.log
+logs/
+
+# PM2
+.pm2/
+pids/
+
+# OS / editor junk
+.DS_Store
+*.swp

@@ -1,0 +1,28 @@
+{
+  "name": "whatsapp-broadcast-bot",
+  "version": "1.0.0",
+  "description": "WhatsApp media approval & broadcast automation bot using Baileys + optional Ollama NLU/captioning",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "discover-groups": "node src/discover-groups.js"
+  },
+  "dependencies": {
+    "baileys": "6.7.24",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "pino": "^10.3.1",
+    "pino-pretty": "^13.0.0",
+    "qrcode-terminal": "^0.12.0",
+    "socket.io": "^4.8.3",
+    "uuid": "^14.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
