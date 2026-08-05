@@ -89,4 +89,41 @@ async function broadcastToGroups(sock, originalMsg) {
   return { sent, failed };
 }
 
-module.exports = { broadcastToGroups, loadGroups };
+/**
+ * Broadcasts a raw media buffer directly to all target groups.
+ * Used for media uploaded directly from the dashboard.
+ */
+async function broadcastRawMedia(sock, buffer, mediaType, caption) {
+  const groups = loadGroups();
+  const delayMs = parseInt(process.env.BROADCAST_DELAY_MS, 10) || 8000;
+  const sent = [];
+  const failed = [];
+
+  logger.info({ groupCount: groups.targetGroups.filter(Boolean).length }, "Starting raw media broadcast...");
+  bus.emit("broadcast:start", { count: groups.targetGroups.filter(Boolean).length });
+
+  for (const jid of groups.targetGroups) {
+    if (!jid) continue;
+    try {
+      if (mediaType === "image") {
+        await sock.sendMessage(jid, { image: buffer, caption });
+      } else {
+        await sock.sendMessage(jid, { video: buffer, caption });
+      }
+      logger.info(`✅ Sent to ${jid}`);
+      sent.push(jid);
+      bus.emit("broadcast:sent", { jid });
+    } catch (e) {
+      logger.error({ err: e.message, jid }, `❌ Failed to send to ${jid}`);
+      failed.push({ jid, error: e.message });
+      bus.emit("broadcast:failed", { jid, error: e.message });
+    }
+    await delay(delayMs);
+  }
+
+  logger.info({ sent: sent.length, failed: failed.length }, "Broadcast complete");
+  bus.emit("broadcast:complete", { sent: sent.length, failed: failed.length });
+  return { sent, failed };
+}
+
+module.exports = { broadcastToGroups, broadcastRawMedia, loadGroups };

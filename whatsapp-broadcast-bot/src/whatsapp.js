@@ -2,6 +2,7 @@ const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBailey
 const qrcode = require("qrcode-terminal");
 const pino = require("pino");
 const logger = require("./utils/logger");
+const bus = require("./events");
 
 /**
  * Starts (or reconnects) the Baileys WhatsApp Web socket.
@@ -9,6 +10,7 @@ const logger = require("./utils/logger");
  * @returns {Promise<import("baileys").WASocket>}
  */
 async function startBot(onReady) {
+  bus.emit("bot:connecting");
   const { state, saveCreds } = await useMultiFileAuthState("./auth");
 
   // fetchLatestBaileysVersion makes a network request to check the latest WA Web version.
@@ -36,6 +38,7 @@ async function startBot(onReady) {
     if (qr) {
       logger.info("Scan this QR code with the BOT's WhatsApp number (Linked Devices → Link a Device):");
       qrcode.generate(qr, { small: true });
+      bus.emit("bot:qr", { qr });
     }
 
     if (connection === "close") {
@@ -49,6 +52,7 @@ async function startBot(onReady) {
         startBot(onReady);
       } else {
         logger.error("Logged out from WhatsApp. Delete the ./auth folder and re-scan the QR code to reconnect.");
+        bus.emit("bot:logged_out");
       }
     } else if (connection === "open") {
       logger.info("✅ Connected to WhatsApp");

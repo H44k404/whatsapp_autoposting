@@ -45,6 +45,7 @@ async function getGroupName(sock, jid) {
 
 let _io = null;
 let botStatus = "disconnected";
+let currentQr = null;
 
 function createServer(handleControlReplyFn, getSock) {
   const app = express();
@@ -68,6 +69,7 @@ function createServer(handleControlReplyFn, getSock) {
       sentToday: stats.sentToday,
       failed: stats.failed,
       targetGroupCount: (groups.targetGroups || []).length,
+      qr: currentQr,
     });
   });
 
@@ -184,6 +186,12 @@ function createServer(handleControlReplyFn, getSock) {
     res.json(activityLog.slice(0, 100));
   });
 
+  // Reset/Relink session
+  app.post("/api/session/reset", (req, res) => {
+    bus.emit("bot:reset_session");
+    res.json({ ok: true });
+  });
+
   // ── Socket.IO ─────────────────────────────────────────────────────────────
   io.on("connection", (socket) => {
     // Send current state immediately on connect
@@ -197,22 +205,35 @@ function createServer(handleControlReplyFn, getSock) {
         createdAt: v.createdAt,
         hasPreview: !!getMediaBuffer(id),
       }));
-    socket.emit("init", { status: botStatus, pending, logs: activityLog.slice(0, 50), stats });
+    socket.emit("init", { status: botStatus, pending, logs: activityLog.slice(0, 50), stats, qr: currentQr });
   });
 
   // ── Forward internal bus events → Socket.IO ──────────────────────────────
   bus.on("bot:connected", () => {
     botStatus = "connected";
+    currentQr = null;
     addLog("bot:connected", {});
     io.emit("bot:connected");
-    io.emit("status:update", { status: "connected" });
+    io.emit("status:update", { status: "connected", qr: null });
   });
 
   bus.on("bot:disconnected", () => {
     botStatus = "disconnected";
+    currentQr = null;
     addLog("bot:disconnected", {});
     io.emit("bot:disconnected");
-    io.emit("status:update", { status: "disconnected" });
+    io.emit("status:update", { status: "disconnected", qr: null });
+  });
+
+  bus.on("bot:connecting", () => {
+    botStatus = "connecting";
+    currentQr = null;
+    io.emit("status:update", { status: "connecting", qr: null });
+  });
+
+  bus.on("bot:qr", (data) => {
+    currentQr = data.qr;
+    io.emit("status:update", { status: "disconnected", qr: currentQr });
   });
 
   bus.on("approval:new", (data) => {

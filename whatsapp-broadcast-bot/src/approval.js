@@ -2,7 +2,7 @@ const { v4: uuidv4 } = require("uuid");
 const { downloadMediaMessage } = require("baileys");
 const { savePending, getPending, deletePending, readAll, saveMediaBuffer } = require("./store");
 const { classifyReply, describeMedia } = require("./ollama");
-const { broadcastToGroups } = require("./broadcaster");
+const { broadcastToGroups, broadcastRawMedia } = require("./broadcaster");
 const logger = require("./utils/logger");
 const bus = require("./events");
 
@@ -39,6 +39,7 @@ async function requestApproval(sock, originalMsg, mediaType, caption) {
     caption: caption || "",
     createdAt: Date.now(),
     status: "pending",
+    isDashboardUpload: false,
   });
 
   // Download a preview buffer for the dashboard (best-effort, non-fatal).
@@ -139,7 +140,20 @@ async function handleControlReply(sock, text) {
 
   if (decision === "yes") {
     await sock.sendMessage(CONTROL_CHAT, { text: `✅ Broadcasting ${id} to all target groups...` });
-    const { sent, failed } = await broadcastToGroups(sock, entry.mediaMessage);
+    let sent, failed;
+    if (entry.isDashboardUpload) {
+      // Dashboard upload: buffer already saved in store, use broadcastRawMedia
+      const { getMediaBuffer } = require("./store");
+      const buf = getMediaBuffer(id);
+      if (!buf) {
+        await sock.sendMessage(CONTROL_CHAT, { text: `❌ Buffer for ${id} not found. Upload may have expired.` });
+        deletePending(id);
+        return;
+      }
+      ({ sent, failed } = await broadcastRawMedia(sock, buf, entry.mediaType, entry.caption));
+    } else {
+      ({ sent, failed } = await broadcastToGroups(sock, entry.mediaMessage));
+    }
     const summary =
       failed.length === 0
         ? `✅ Done. Sent ${id} to ${sent.length} group(s).`

@@ -15,6 +15,8 @@ if (!MAIN_GROUP || !CONTROL_CHAT) {
   );
 }
 
+const fs = require("fs");
+
 // Hold a reference to the active socket so the dashboard API can use it.
 let currentSock = null;
 const getSock = () => currentSock;
@@ -22,72 +24,102 @@ const getSock = () => currentSock;
 // Start the web dashboard server before the bot connects.
 createServer(handleControlReply, getSock);
 
-startBot(async (sock) => {
-  currentSock = sock;
-  bus.emit("bot:connected");
+function connectBot() {
+  startBot(async (sock) => {
+    currentSock = sock;
+    bus.emit("bot:connected");
 
-  // Pre-warm the Signal Protocol session with the control chat immediately on
-  // connect. This ensures the encrypted session is freshly negotiated BEFORE
-  // the first approval message is sent, preventing "Bad MAC" errors on the
-  // owner's first YES/NO reply after a bot restart.
-  if (CONTROL_CHAT) {
-    try {
-      await sock.sendMessage(CONTROL_CHAT, { text: "🤖 Bot connected and ready." });
-      logger.info("Session warmup ping sent to control chat");
-    } catch (e) {
-      logger.warn({ err: e.message }, "Session warmup ping failed (non-fatal)");
-    }
-  }
-
-  sock.ev.on("connection.update", ({ connection }) => {
-    if (connection === "close") {
-      currentSock = null;
-      bus.emit("bot:disconnected");
-    }
-  });
-
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    for (const msg of messages) {
+    // Pre-warm the Signal Protocol session with the control chat immediately on
+    // connect. This ensures the encrypted session is freshly negotiated BEFORE
+    // the first approval message is sent, preventing "Bad MAC" errors on the
+    // owner's first YES/NO reply after a bot restart.
+    if (CONTROL_CHAT) {
       try {
-        if (!msg.message) continue;
-        const from = msg.key.remoteJid;
-        const isFromMe = msg.key.fromMe;
-
-        // Case 1: media posted in the main (source) group
-        // Skip own messages in the group (the bot shouldn't react to its own sends)
-        if (MAIN_GROUP && from === MAIN_GROUP && !isFromMe) {
-          const imageMsg = msg.message.imageMessage;
-          const videoMsg = msg.message.videoMessage;
-
-          if (imageMsg || videoMsg) {
-            const mediaType = imageMsg ? "image" : "video";
-            const caption = (imageMsg || videoMsg).caption || "";
-            const id = await requestApproval(sock, msg, mediaType, caption);
-            logger.info({ id, mediaType }, "Approval request sent to control chat");
-          }
-          continue;
-        }
-
-        // Case 2: reply in the private control chat.
-        // WhatsApp multi-device sometimes sends private replies from a Linked Device ID (@lid)
-        // instead of the standard phone number JID (@s.whatsapp.net).
-        // To fix this, we will accept any private message (not from a group) as a control reply.
-        const text =
-          msg.message.conversation ||
-          msg.message.extendedTextMessage?.text ||
-          "";
-
-        const isPrivateChat = !from.endsWith('@g.us');
-
-        if (isPrivateChat && !isFromMe && text) {
-          logger.info({ from, text }, "Control chat reply received (via private chat)");
-          await handleControlReply(sock, text);
-        }
+        await sock.sendMessage(CONTROL_CHAT, { text: "🤖 Bot connected and ready." });
+        logger.info("Session warmup ping sent to control chat");
       } catch (e) {
-        logger.error({ err: e.message, stack: e.stack }, "Error handling incoming message");
+        logger.warn({ err: e.message }, "Session warmup ping failed (non-fatal)");
       }
     }
+
+    sock.ev.on("connection.update", ({ connection }) => {
+      if (connection === "close") {
+        currentSock = null;
+        bus.emit("bot:disconnected");
+      }
+    });
+
+    sock.ev.on("messages.upsert", async ({ messages }) => {
+      for (const msg of messages) {
+        try {
+          if (!msg.message) continue;
+          const from = msg.key.remoteJid;
+          const isFromMe = msg.key.fromMe;
+
+          // Case 1: media posted in the main (source) group
+          // Skip own messages in the group (the bot shouldn't react to its own sends)
+          if (MAIN_GROUP && from === MAIN_GROUP && !isFromMe) {
+            const imageMsg = msg.message.imageMessage;
+            const videoMsg = msg.message.videoMessage;
+
+            if (imageMsg || videoMsg) {
+              const mediaType = imageMsg ? "image" : "video";
+              const caption = (imageMsg || videoMsg).caption || "";
+              const id = await requestApproval(sock, msg, mediaType, caption);
+              logger.info({ id, mediaType }, "Approval request sent to control chat");
+            }
+            continue;
+          }
+
+          // Case 2: reply in the private control chat.
+          // WhatsApp multi-device sometimes sends private replies from a Linked Device ID (@lid)
+          // instead of the standard phone number JID (@s.whatsapp.net).
+          // To fix this, we will accept any private message (not from a group) as a control reply.
+          const text =
+            msg.message.conversation ||
+            msg.message.extendedTextMessage?.text ||
+            "";
+
+          const isPrivateChat = !from.endsWith('@g.us');
+
+          if (isPrivateChat && !isFromMe && text) {
+            logger.info({ from, text }, "Control chat reply received (via private chat)");
+            await handleControlReply(sock, text);
+          }
+        } catch (e) {
+          logger.error({ err: e.message, stack: e.stack }, "Error handling incoming message");
+        }
+      }
+    });
   });
+}
+
+// Start initial connection
+connectBot();
+
+// Listen to reset requests from server
+bus.on("bot:reset_session", async () => {
+  logger.info("Reset session triggered. Logging out...");
+  if (currentSock) {
+    try {
+      await currentSock.logout();
+    } catch (e) {
+      try { currentSock.end(); } catch (_) {}
+    }
+    currentSock = null;
+  }
+  
+  // Wait a second for close event to propagate
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  
+  try {
+    fs.rmSync(path.join(__dirname, "..", "auth"), { recursive: true, force: true });
+    logger.info("Credentials cleared successfully.");
+  } catch (err) {
+    logger.warn({ err: err.message }, "Auth folder delete failed or did not exist.");
+  }
+  
+  connectBot();
 });
 
 process.on("unhandledRejection", (err) => {
