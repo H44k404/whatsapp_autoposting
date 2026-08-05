@@ -3,13 +3,16 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>WA Broadcast — Control Center</title>
+  <title>WA Broadcast — Command Center</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <!-- Ambient background -->
+  <div class="aurora-bg" aria-hidden="true"></div>
+
   <!-- Sidebar -->
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-logo">
@@ -22,7 +25,8 @@
       </div>
     </div>
 
-    <nav class="sidebar-nav">
+    <nav class="sidebar-nav" id="sidebar-nav">
+      <div class="nav-pill" id="nav-pill"></div>
       <a class="nav-item active" data-section="overview" onclick="showSection('overview', this)">
         <svg viewBox="0 0 24 24"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
         Overview
@@ -47,6 +51,13 @@
         <span class="status-dot" id="status-dot"></span>
         <span id="status-text">Connecting…</span>
       </div>
+      <div class="sidebar-user">
+        <div class="sidebar-user-avatar">OP</div>
+        <div>
+          <div class="sidebar-user-name">Operator</div>
+          <div class="sidebar-user-role">Control Chat Owner</div>
+        </div>
+      </div>
     </div>
   </aside>
 
@@ -56,32 +67,57 @@
       <div class="h1" id="page-title">Overview</div>
       <div class="topbar-right">
         <div class="stat-chip success">
-          <span class="chip-val" id="stat-sent">0</span>
+          <div class="chip-top">
+            <span class="chip-val" id="stat-sent">0</span>
+            <canvas class="chip-spark" id="spark-sent" width="92" height="44"></canvas>
+          </div>
           <span class="chip-label">Sent Today</span>
         </div>
         <div class="stat-chip warn">
-          <span class="chip-val" id="stat-pending">0</span>
+          <div class="chip-top">
+            <span class="chip-val" id="stat-pending">0</span>
+          </div>
           <span class="chip-label">Pending</span>
         </div>
         <div class="stat-chip danger">
-          <span class="chip-val" id="stat-failed">0</span>
+          <div class="chip-top">
+            <span class="chip-val" id="stat-failed">0</span>
+          </div>
           <span class="chip-label">Failed</span>
         </div>
         <div class="stat-chip">
-          <span class="chip-val" id="stat-groups">—</span>
+          <div class="chip-top">
+            <span class="chip-val" id="stat-groups">—</span>
+          </div>
           <span class="chip-label">Target Groups</span>
+        </div>
+
+        <div class="notif-wrap">
+          <button class="icon-btn" id="notif-bell" onclick="toggleNotifDropdown()" title="Notifications">
+            <svg viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2zm-2 1H8v-6c0-2.48 1.51-4.5 4-4.5s4 2.02 4 4.5v6z"/></svg>
+            <span class="dot-alert" id="notif-dot"></span>
+          </button>
+          <div class="notif-dropdown" id="notif-dropdown">
+            <div class="notif-dropdown-header">
+              Notifications
+              <span id="notif-count-label">0 new</span>
+            </div>
+            <div class="notif-list" id="notif-list">
+              <div class="notif-empty">You're all caught up</div>
+            </div>
+          </div>
         </div>
       </div>
     </header>
 
     <!-- OVERVIEW -->
     <section class="content-section active" id="section-overview">
-      <div class="stats-row">
+      <div class="stats-row stagger-in">
         <div class="stat-card bg-success">
           <div class="stat-card-icon">
             <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
           </div>
-          <div>
+          <div class="stat-card-body">
             <div class="stat-card-val" id="ov-sent">0</div>
             <div class="stat-card-label">Messages Sent</div>
           </div>
@@ -90,7 +126,7 @@
           <div class="stat-card-icon">
             <svg viewBox="0 0 24 24"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
           </div>
-          <div>
+          <div class="stat-card-body">
             <div class="stat-card-val" id="ov-pending">0</div>
             <div class="stat-card-label">Awaiting Approval</div>
           </div>
@@ -99,7 +135,7 @@
           <div class="stat-card-icon">
             <svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
           </div>
-          <div>
+          <div class="stat-card-body">
             <div class="stat-card-val" id="ov-failed">0</div>
             <div class="stat-card-label">Failed Sends</div>
           </div>
@@ -108,14 +144,14 @@
           <div class="stat-card-icon">
             <svg viewBox="0 0 24 24"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
           </div>
-          <div>
+          <div class="stat-card-body">
             <div class="stat-card-val" id="ov-groups">—</div>
             <div class="stat-card-label">Target Groups</div>
           </div>
         </div>
       </div>
 
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:24px;">
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:22px;" class="stagger-in">
         <!-- Pending approvals mini -->
         <div class="glass-card">
           <div class="card-header">
@@ -137,7 +173,7 @@
             </div>
             <a class="card-link" onclick="showSection('activity', document.querySelector('[data-section=activity]'))">View all →</a>
           </div>
-          <div id="ov-activity-list" class="activity-feed"></div>
+          <div id="ov-activity-list" class="activity-feed" style="max-height:none;"></div>
         </div>
       </div>
     </section>
@@ -157,9 +193,12 @@
     <section class="content-section" id="section-activity">
       <div class="glass-card full-height">
         <div class="card-header" style="margin-bottom: 16px;">
-          <div class="card-title">Activity Feed</div>
+          <div class="card-title">
+            <svg viewBox="0 0 24 24"><path d="M13 2.05v3.03c3.39.49 6 3.39 6 6.92 0 .9-.18 1.75-.48 2.54l2.6 1.53c.56-1.24.88-2.62.88-4.07 0-5.18-3.95-9.45-9-9.95zM12 19c-3.87 0-7-3.13-7-7 0-3.53 2.61-6.43 6-6.92V2.05c-5.06.5-9 4.76-9 9.95 0 5.52 4.47 10 9.99 10 3.31 0 6.24-1.61 8.06-4.09l-2.6-1.53C16.17 17.98 14.21 19 12 19z"/></svg>
+            Activity Feed
+          </div>
         </div>
-        <div id="activity-feed" class="activity-feed" style="max-height: calc(100vh - 180px);"></div>
+        <div id="activity-feed" class="activity-feed" style="max-height: calc(100vh - 220px);"></div>
       </div>
     </section>
 
@@ -168,22 +207,36 @@
       <div class="groups-layout">
         <div class="glass-card">
           <div class="card-header">
-            <div class="card-title">Source Configuration</div>
+            <div class="card-title">
+              <svg viewBox="0 0 24 24"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
+              Source Configuration
+            </div>
           </div>
-          <div class="sub-label" style="margin-bottom: 8px;">Main Monitored Group</div>
+          <div class="sub-label" style="margin-bottom: 10px;">Main Monitored Group</div>
           <div class="group-readonly" id="main-group-display">Loading…</div>
         </div>
 
         <div class="glass-card">
           <div class="card-header">
-            <div class="card-title">Broadcast Targets</div>
-            <button class="btn-primary" onclick="saveGroups()">Save Changes</button>
+            <div class="card-title">
+              <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+              Broadcast Targets
+            </div>
+            <button class="btn-primary" id="save-groups-btn" onclick="saveGroups()">
+              <span class="spinner"></span>
+              <svg viewBox="0 0 24 24"><path d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/></svg>
+              <span class="btn-label">Save Changes</span>
+            </button>
           </div>
           <div id="groups-list" class="groups-edit-list"></div>
           <div class="add-group-row">
             <input class="input" id="new-group-jid" placeholder="JID (e.g., 120363xxx@g.us)" />
-            <button class="btn-outline" onclick="addGroupRow()">Add Group</button>
+            <button class="btn-outline" onclick="addGroupRow()">
+              <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+              Add Group
+            </button>
           </div>
+          <div class="save-msg" id="groups-save-msg"></div>
         </div>
       </div>
     </section>
