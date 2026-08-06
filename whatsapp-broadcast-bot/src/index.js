@@ -1,4 +1,22 @@
 require("dotenv").config({ quiet: true });
+const path = require("path");
+
+// ── Suppress verbose Signal Protocol dumps from Baileys internals ────────
+const origLog = console.log;
+console.log = function (...args) {
+  if (typeof args[0] === 'string' && (args[0].includes('Closing session:') || args[0].includes('SessionEntry'))) return;
+  origLog.apply(console, args);
+};
+const origStdoutWrite = process.stdout.write;
+process.stdout.write = function (chunk, encoding, callback) {
+  if (typeof chunk === 'string' && (chunk.includes('SessionEntry') || chunk.includes('registrationId'))) {
+    if (callback) callback();
+    return true;
+  }
+  return origStdoutWrite.apply(process.stdout, arguments);
+};
+// ─────────────────────────────────────────────────────────────────────────
+
 const { startBot } = require("./whatsapp");
 const { requestApproval, handleControlReply } = require("./approval");
 const { createServer } = require("./server");
@@ -29,19 +47,6 @@ function connectBot() {
     currentSock = sock;
     bus.emit("bot:connected");
 
-    // Pre-warm the Signal Protocol session with the control chat immediately on
-    // connect. This ensures the encrypted session is freshly negotiated BEFORE
-    // the first approval message is sent, preventing "Bad MAC" errors on the
-    // owner's first YES/NO reply after a bot restart.
-    if (CONTROL_CHAT) {
-      try {
-        await sock.sendMessage(CONTROL_CHAT, { text: "🤖 Bot connected and ready." });
-        logger.info("Session warmup ping sent to control chat");
-      } catch (e) {
-        logger.warn({ err: e.message }, "Session warmup ping failed (non-fatal)");
-      }
-    }
-
     sock.ev.on("connection.update", ({ connection }) => {
       if (connection === "close") {
         currentSock = null;
@@ -69,6 +74,29 @@ function connectBot() {
               logger.info({ id, mediaType }, "Approval request sent to control chat");
             }
             continue;
+          }
+
+          // Forward all group messages to the dashboard chat panel in real-time
+          if (from.endsWith("@g.us") && !isFromMe) {
+            const text =
+              msg.message.conversation ||
+              msg.message.extendedTextMessage?.text ||
+              msg.message.imageMessage?.caption ||
+              msg.message.videoMessage?.caption ||
+              (msg.message.imageMessage ? "[Image]" : null) ||
+              (msg.message.videoMessage ? "[Video]" : null) ||
+              (msg.message.stickerMessage ? "[Sticker]" : null) ||
+              (msg.message.audioMessage ? "[Audio]" : null);
+            if (text) {
+              bus.emit("chat:message", {
+                jid: from,
+                id: msg.key.id,
+                fromMe: false,
+                sender: msg.key.participant || from,
+                text,
+                ts: Date.now(),
+              });
+            }
           }
 
           // Case 2: reply in the private control chat.
@@ -101,10 +129,14 @@ connectBot();
 bus.on("bot:reset_session", async () => {
   logger.info("Reset session triggered. Logging out...");
   if (currentSock) {
+    const origLog = console.log;
+    console.log = () => {};  // silence Signal Protocol session dumps during logout
     try {
       await currentSock.logout();
     } catch (e) {
       try { currentSock.end(); } catch (_) {}
+    } finally {
+      console.log = origLog;
     }
     currentSock = null;
   }

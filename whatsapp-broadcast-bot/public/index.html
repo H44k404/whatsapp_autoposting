@@ -1,20 +1,49 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>WA Broadcast — Control Center</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap"
+    rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
 </head>
+
 <body>
+  <!-- QR Code Modal (Hidden by default) -->
+  <div id="qr-modal" class="modal-overlay"
+    style="display: none; align-items: center; justify-content: center; z-index: 10000; background: rgba(15, 23, 42, 0.95); position: fixed; inset: 0;">
+    <div class="glass-card"
+      style="text-align: center; max-width: 440px; padding: 40px; border-radius: 24px; animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);">
+      <div style="margin-bottom: 20px;">
+        <svg viewBox="0 0 24 24" width="48" height="48" fill="var(--accent)">
+          <path
+            d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z" />
+        </svg>
+      </div>
+      <h2 style="font-size: 24px; margin-bottom: 12px; color: var(--text);">Link WhatsApp</h2>
+      <p style="color: var(--text-muted); margin-bottom: 32px; line-height: 1.5; font-size: 15px;">
+        The bot is disconnected. Scan this QR code with your WhatsApp app to link the device and start the dashboard.
+      </p>
+      <div
+        style="background: white; padding: 16px; border-radius: 16px; display: inline-block; box-shadow: 0 8px 32px rgba(0,0,0,0.2);">
+        <img id="qr-image" src="" alt="WhatsApp QR Code" style="width: 250px; height: 250px; display: block;" />
+      </div>
+      <p style="color: var(--text-muted); font-size: 13px; margin-top: 32px;">
+        Open WhatsApp on your phone &rarr; Settings &rarr; Linked Devices &rarr; <strong>Link a Device</strong>
+      </p>
+    </div>
+  </div>
+
   <!-- Sidebar -->
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-logo">
       <div class="logo-icon">
-        <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14.5v-9l6 4.5-6 4.5z"/></svg>
+        <img src="/logo.png" alt="Logo" style="width:40px; height:40px; object-fit:contain; border-radius:8px;" />
       </div>
       <div class="logo-text">
         <span class="logo-title">Broadcast AI</span>
@@ -24,20 +53,31 @@
 
     <nav class="sidebar-nav">
       <a class="nav-item active" data-section="overview" onclick="showSection('overview', this)">
-        <svg viewBox="0 0 24 24"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
+        <svg viewBox="0 0 24 24">
+          <path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z" />
+        </svg>
         Overview
       </a>
       <a class="nav-item" data-section="approvals" onclick="showSection('approvals', this)">
-        <svg viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2zm-2 1H8v-6c0-2.48 1.51-4.5 4-4.5s4 2.02 4 4.5v6z"/></svg>
+        <svg viewBox="0 0 24 24">
+          <path
+            d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2zm-2 1H8v-6c0-2.48 1.51-4.5 4-4.5s4 2.02 4 4.5v6z" />
+        </svg>
         Approvals
         <span class="badge" id="badge-pending">0</span>
       </a>
       <a class="nav-item" data-section="activity" onclick="showSection('activity', this)">
-        <svg viewBox="0 0 24 24"><path d="M13 2.05v3.03c3.39.49 6 3.39 6 6.92 0 .9-.18 1.75-.48 2.54l2.6 1.53c.56-1.24.88-2.62.88-4.07 0-5.18-3.95-9.45-9-9.95zM12 19c-3.87 0-7-3.13-7-7 0-3.53 2.61-6.43 6-6.92V2.05c-5.06.5-9 4.76-9 9.95 0 5.52 4.47 10 9.99 10 3.31 0 6.24-1.61 8.06-4.09l-2.6-1.53C16.17 17.98 14.21 19 12 19z"/></svg>
+        <svg viewBox="0 0 24 24">
+          <path
+            d="M13 2.05v3.03c3.39.49 6 3.39 6 6.92 0 .9-.18 1.75-.48 2.54l2.6 1.53c.56-1.24.88-2.62.88-4.07 0-5.18-3.95-9.45-9-9.95zM12 19c-3.87 0-7-3.13-7-7 0-3.53 2.61-6.43 6-6.92V2.05c-5.06.5-9 4.76-9 9.95 0 5.52 4.47 10 9.99 10 3.31 0 6.24-1.61 8.06-4.09l-2.6-1.53C16.17 17.98 14.21 19 12 19z" />
+        </svg>
         Activity Feed
       </a>
       <a class="nav-item" data-section="groups" onclick="showSection('groups', this)">
-        <svg viewBox="0 0 24 24"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
+        <svg viewBox="0 0 24 24">
+          <path
+            d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z" />
+        </svg>
         Target Groups
       </a>
     </nav>
@@ -47,7 +87,15 @@
         <span class="status-dot" id="status-dot"></span>
         <span id="status-text">Connecting…</span>
       </div>
-      <button class="btn-outline" onclick="resetSession()" style="width: 100%; font-size: 12px; padding: 8px 0; border-color: rgba(239, 68, 68, 0.2); color: var(--danger); background: transparent; cursor: pointer; transition: all var(--transition);">Reset Session</button>
+      <button class="btn-outline" onclick="resetSession()"
+        style="width: 100%; font-size: 12px; padding: 10px 10px; border-color: rgba(239, 68, 68, 0.2); color: var(--danger); background: transparent; cursor: pointer; transition: all var(--transition);">Reset
+        Session</button>
+      <button onclick="doLogout()"
+        style="width:100%;font-size:12px;padding:10px;background:rgba(124,58,237,0.1);border:1px solid rgba(124,58,237,0.25);border-radius:8px;color:#a78bfa;cursor:pointer;font-family:inherit;font-weight:600;transition:all 0.2s;letter-spacing:0.01em;"
+        onmouseover="this.style.background='rgba(124,58,237,0.2)'"
+        onmouseout="this.style.background='rgba(124,58,237,0.1)'">
+        Logout
+      </button>
     </div>
   </aside>
 
@@ -81,14 +129,20 @@
       <div id="session-card" class="glass-card" style="margin-bottom: 24px; display: none;">
         <div class="card-header">
           <div class="card-title">
-            <svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10h-4v4h-2v-4H7v-2h4V7h2v4h4v2z"/></svg>
+            <svg viewBox="0 0 24 24">
+              <path
+                d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10h-4v4h-2v-4H7v-2h4V7h2v4h4v2z" />
+            </svg>
             WhatsApp Connection Setup
           </div>
-          <button class="btn-outline" onclick="resetSession()" style="padding: 6px 12px; font-size: 12px;">Reset & Relink Session</button>
+          <button class="btn-outline" onclick="resetSession()" style="padding: 6px 12px; font-size: 12px;">Reset &
+            Relink Session</button>
         </div>
         <div style="display: flex; gap: 24px; align-items: center; flex-wrap: wrap;">
-          <div id="qr-container" style="width: 200px; height: 200px; background: #000; border-radius: var(--radius-md); display: flex; align-items: center; justify-content: center; border: 1px solid var(--border-light); overflow: hidden;">
-            <div style="color: var(--text-muted); font-size: 13px; text-align: center; padding: 20px;">Generating QR Code...</div>
+          <div id="qr-container"
+            style="width: 200px; height: 200px; background: #000; border-radius: var(--radius-md); display: flex; align-items: center; justify-content: center; border: 1px solid var(--border-light); overflow: hidden;">
+            <div style="color: var(--text-muted); font-size: 13px; text-align: center; padding: 20px;">Generating QR
+              Code...</div>
           </div>
           <div style="flex: 1; min-width: 250px;">
             <h3 style="font-size: 16px; margin-bottom: 8px;">Link Your WhatsApp Account</h3>
@@ -105,7 +159,9 @@
       <div class="stats-row">
         <div class="stat-card bg-success">
           <div class="stat-card-icon">
-            <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+            <svg viewBox="0 0 24 24">
+              <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
+            </svg>
           </div>
           <div>
             <div class="stat-card-val" id="ov-sent">0</div>
@@ -114,7 +170,10 @@
         </div>
         <div class="stat-card bg-warning">
           <div class="stat-card-icon">
-            <svg viewBox="0 0 24 24"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
+            <svg viewBox="0 0 24 24">
+              <path
+                d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z" />
+            </svg>
           </div>
           <div>
             <div class="stat-card-val" id="ov-pending">0</div>
@@ -123,7 +182,10 @@
         </div>
         <div class="stat-card bg-danger">
           <div class="stat-card-icon">
-            <svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+            <svg viewBox="0 0 24 24">
+              <path
+                d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
+            </svg>
           </div>
           <div>
             <div class="stat-card-val" id="ov-failed">0</div>
@@ -132,7 +194,10 @@
         </div>
         <div class="stat-card bg-primary">
           <div class="stat-card-icon">
-            <svg viewBox="0 0 24 24"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
+            <svg viewBox="0 0 24 24">
+              <path
+                d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z" />
+            </svg>
           </div>
           <div>
             <div class="stat-card-val" id="ov-groups">—</div>
@@ -146,10 +211,14 @@
         <div class="glass-card">
           <div class="card-header">
             <div class="card-title">
-              <svg viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2zm-2 1H8v-6c0-2.48 1.51-4.5 4-4.5s4 2.02 4 4.5v6z"/></svg>
+              <svg viewBox="0 0 24 24">
+                <path
+                  d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2zm-2 1H8v-6c0-2.48 1.51-4.5 4-4.5s4 2.02 4 4.5v6z" />
+              </svg>
               Pending Approvals
             </div>
-            <a class="card-link" onclick="showSection('approvals', document.querySelector('[data-section=approvals]'))">View all →</a>
+            <a class="card-link"
+              onclick="showSection('approvals', document.querySelector('[data-section=approvals]'))">View all →</a>
           </div>
           <div id="ov-approval-list" class="approval-list-mini"></div>
         </div>
@@ -158,10 +227,14 @@
         <div class="glass-card">
           <div class="card-header">
             <div class="card-title">
-              <svg viewBox="0 0 24 24"><path d="M13 2.05v3.03c3.39.49 6 3.39 6 6.92 0 .9-.18 1.75-.48 2.54l2.6 1.53c.56-1.24.88-2.62.88-4.07 0-5.18-3.95-9.45-9-9.95zM12 19c-3.87 0-7-3.13-7-7 0-3.53 2.61-6.43 6-6.92V2.05c-5.06.5-9 4.76-9 9.95 0 5.52 4.47 10 9.99 10 3.31 0 6.24-1.61 8.06-4.09l-2.6-1.53C16.17 17.98 14.21 19 12 19z"/></svg>
+              <svg viewBox="0 0 24 24">
+                <path
+                  d="M13 2.05v3.03c3.39.49 6 3.39 6 6.92 0 .9-.18 1.75-.48 2.54l2.6 1.53c.56-1.24.88-2.62.88-4.07 0-5.18-3.95-9.45-9-9.95zM12 19c-3.87 0-7-3.13-7-7 0-3.53 2.61-6.43 6-6.92V2.05c-5.06.5-9 4.76-9 9.95 0 5.52 4.47 10 9.99 10 3.31 0 6.24-1.61 8.06-4.09l-2.6-1.53C16.17 17.98 14.21 19 12 19z" />
+              </svg>
               Live Activity
             </div>
-            <a class="card-link" onclick="showSection('activity', document.querySelector('[data-section=activity]'))">View all →</a>
+            <a class="card-link"
+              onclick="showSection('activity', document.querySelector('[data-section=activity]'))">View all →</a>
           </div>
           <div id="ov-activity-list" class="activity-feed"></div>
         </div>
@@ -172,7 +245,10 @@
     <section class="content-section" id="section-approvals">
       <div class="approval-grid" id="approval-grid">
         <div class="empty-state full">
-          <div class="empty-icon"><svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg></div>
+          <div class="empty-icon"><svg viewBox="0 0 24 24">
+              <path
+                d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" />
+            </svg></div>
           <div class="empty-title">All Caught Up</div>
           <div class="empty-sub">There are no pending approvals.</div>
         </div>
@@ -191,31 +267,132 @@
 
     <!-- GROUPS -->
     <section class="content-section" id="section-groups">
-      <div class="groups-layout">
-        <div class="glass-card">
-          <div class="card-header">
-            <div class="card-title">Source Configuration</div>
+      <div class="groups-page">
+
+        <!-- Left: Groups Picker -->
+        <div class="groups-picker-col">
+          <div class="glass-card groups-picker-card">
+            <div class="card-header">
+              <div class="card-title">
+                <svg viewBox="0 0 24 24">
+                  <path
+                    d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z" />
+                </svg>
+                All Groups
+              </div>
+              <button class="btn-primary" id="groups-save-btn" onclick="saveGroupsFromPicker()">
+                <span class="btn-label">Save Targets</span>
+                <span class="spinner"></span>
+              </button>
+            </div>
+            <!-- Search bar -->
+            <div class="groups-search-wrap">
+              <svg viewBox="0 0 24 24">
+                <path
+                  d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" />
+              </svg>
+              <input id="groups-search" class="groups-search-input" placeholder="Search groups…"
+                oninput="filterGroupsList(this.value)" />
+            </div>
+            <div id="save-msg" class="save-msg"></div>
+            <div id="all-groups-list" class="all-groups-list">
+              <div class="empty-state">
+                <div class="empty-sub" id="groups-list-status">Loading groups…</div>
+              </div>
+            </div>
           </div>
-          <div class="sub-label" style="margin-bottom: 8px;">Main Monitored Group</div>
-          <div class="group-readonly" id="main-group-display">Loading…</div>
         </div>
 
-        <div class="glass-card">
-          <div class="card-header">
-            <div class="card-title">Broadcast Targets</div>
-            <button class="btn-primary" onclick="saveGroups()">Save Changes</button>
-          </div>
-          <div id="groups-list" class="groups-edit-list"></div>
-          <div class="add-group-row">
-            <input class="input" id="new-group-jid" placeholder="JID (e.g., 120363xxx@g.us)" />
-            <button class="btn-outline" onclick="addGroupRow()">Add Group</button>
+        <!-- Right: Chat Panel -->
+        <div class="chat-panel-col" id="chat-panel-col">
+          <div class="glass-card chat-panel-card" id="chat-panel">
+            <!-- Empty state -->
+            <div class="chat-empty-state" id="chat-empty">
+              <div class="chat-empty-icon">
+                <svg viewBox="0 0 24 24">
+                  <path
+                    d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z" />
+                </svg>
+              </div>
+              <div class="chat-empty-title">Select a group</div>
+              <div class="chat-empty-sub">Click the chat icon on any group to open its conversation</div>
+            </div>
+            <!-- Active chat -->
+            <div class="chat-active" id="chat-active" style="display:none;">
+              <div class="chat-header" id="chat-header">
+                <button class="chat-back-btn" onclick="closeGroupChat()">
+                  <svg viewBox="0 0 24 24">
+                    <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z" />
+                  </svg>
+                </button>
+                <div class="chat-header-avatar" id="chat-header-avatar">G</div>
+                <div class="chat-header-info">
+                  <div class="chat-header-name" id="chat-header-name">Group Name</div>
+                  <div class="chat-header-sub" id="chat-header-sub">0 participants</div>
+                </div>
+              </div>
+              <div class="chat-messages" id="chat-messages"></div>
+              <div class="chat-compose" id="chat-compose" style="display:none;">
+                <input class="chat-input" id="chat-input" placeholder="Type a message…"
+                  onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChatMessage()}" />
+                <button class="chat-send-btn" onclick="sendChatMessage()" id="chat-send-btn">
+                  <svg viewBox="0 0 24 24">
+                    <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+                  </svg>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
+
       </div>
     </section>
   </main>
 
+  <!-- Broadcast Settings Modal -->
+  <div id="broadcast-modal" class="modal-backdrop" style="display:none;">
+    <div class="modal-content">
+      <div class="card-header">
+        <div class="card-title"> Broadcast Settings</div>
+        <button class="modal-close-btn" onclick="closeBroadcastModal()">
+          <svg viewBox="0 0 24 24">
+            <path
+              d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12 19 6.41z" />
+          </svg>
+        </button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="sub-label" style="display:block; margin-bottom:8px;">⏱ Time Gap Between Sends (Seconds)</label>
+          <input type="number" id="broadcast-delay-input" value="5" min="0" step="1" onchange="saveBroadcastPrefs()" />
+        </div>
+
+        <div class="form-group">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <label class="sub-label">📱 Select Target Groups</label>
+            <button class="btn-outline" id="select-toggle-btn"
+              style="padding:4px 10px; font-size:11px; border-radius:6px;"
+              onclick="toggleSelectAllBroadcastGroups()">Select All</button>
+          </div>
+          <div id="broadcast-groups-list" class="broadcast-groups-list">
+            <!-- Checkboxes injected by app.js -->
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn-outline" onclick="closeBroadcastModal()">Cancel</button>
+        <button class="btn-primary" id="broadcast-confirm-btn" onclick="confirmBroadcast()">
+          <span class="btn-label">Confirm Broadcast</span>
+          <span class="spinner"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <script src="/socket.io/socket.io.js"></script>
   <script src="app.js"></script>
 </body>
+
 </html>

@@ -49,7 +49,7 @@ async function requestApproval(sock, originalMsg, mediaType, caption) {
       logger,
       reuploadRequest: sock.updateMediaMessage,
     });
-    saveMediaBuffer(id, buf);
+    saveMediaBuffer(id, buf, mediaType);
     previewBase64 = buf.toString("base64");
   } catch (e) {
     logger.warn({ err: e.message }, "Could not download media preview for dashboard");
@@ -126,7 +126,10 @@ async function handleControlReply(sock, text) {
     }
   }
   if (!decision) return;
+  await resolveApproval(sock, id, decision);
+}
 
+async function resolveApproval(sock, id, decision, options = {}) {
   const handle = timeoutHandles.get(id);
   if (handle) {
     clearTimeout(handle);
@@ -139,7 +142,8 @@ async function handleControlReply(sock, text) {
   bus.emit("approval:resolved", { id, decision });
 
   if (decision === "yes") {
-    await sock.sendMessage(CONTROL_CHAT, { text: `✅ Broadcasting ${id} to all target groups...` });
+    const groupText = options.customGroups ? `${options.customGroups.length} selected group(s)` : `all target groups`;
+    await sock.sendMessage(CONTROL_CHAT, { text: `✅ Broadcasting ${id} to ${groupText}...` });
     let sent, failed;
     if (entry.isDashboardUpload) {
       // Dashboard upload: buffer already saved in store, use broadcastRawMedia
@@ -150,9 +154,9 @@ async function handleControlReply(sock, text) {
         deletePending(id);
         return;
       }
-      ({ sent, failed } = await broadcastRawMedia(sock, buf, entry.mediaType, entry.caption));
+      ({ sent, failed } = await broadcastRawMedia(sock, buf, entry.mediaType, entry.caption, options));
     } else {
-      ({ sent, failed } = await broadcastToGroups(sock, entry.mediaMessage));
+      ({ sent, failed } = await broadcastToGroups(sock, entry.mediaMessage, options));
     }
     const summary =
       failed.length === 0
@@ -166,4 +170,4 @@ async function handleControlReply(sock, text) {
   deletePending(id);
 }
 
-module.exports = { requestApproval, handleControlReply };
+module.exports = { requestApproval, handleControlReply, resolveApproval };

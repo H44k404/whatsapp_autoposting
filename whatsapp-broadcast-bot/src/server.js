@@ -7,10 +7,13 @@ require("dotenv").config({ quiet: true });
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
+const session = require("express-session");
 const path = require("path");
 const fs = require("fs");
 const bus = require("./events");
 const { readAll, getMediaBuffer } = require("./store");
+const { messageStore } = require("./whatsapp");
+const { downloadMediaMessage } = require("baileys");
 
 const PORT = parseInt(process.env.DASHBOARD_PORT, 10) || 3000;
 const GROUPS_PATH = path.join(__dirname, "..", "config", "groups.json");
@@ -27,6 +30,19 @@ const stats = { sentToday: 0, failed: 0 };
 
 // Group name cache to avoid spamming the WhatsApp API
 const groupNameCache = new Map();
+let cachedParticipatingGroups = null;
+let groupCacheTime = 0;
+
+async function refreshGroupCache(sock) {
+  if (!sock) return;
+  try {
+    const participating = await sock.groupFetchAllParticipating();
+    cachedParticipatingGroups = participating;
+    groupCacheTime = Date.now();
+  } catch (e) {
+    // ignore
+  }
+}
 async function getGroupName(sock, jid) {
   if (!jid) return "";
   if (groupNameCache.has(jid)) return groupNameCache.get(jid);
@@ -47,6 +63,9 @@ let _io = null;
 let botStatus = "disconnected";
 let currentQr = null;
 
+// Track which group chat the dashboard has open (for real-time forwarding)
+let activeChatJid = null;
+
 function createServer(handleControlReplyFn, getSock) {
   const app = express();
   const httpServer = http.createServer(app);
@@ -54,9 +73,55 @@ function createServer(handleControlReplyFn, getSock) {
   _io = io;
 
   app.use(express.json());
+
+  // ── Session middleware ────────────────────────────────────────────────────
+  app.use(session({
+    secret: process.env.SESSION_SECRET || "wa-broadcast-secret-fallback",
+    resave: false,
+    saveUninitialized: false,
+    cookie: { httpOnly: true }, // Removed maxAge so session expires on browser close
+  }));
+
+  // ── Auth middleware ───────────────────────────────────────────────────────
+  function requireAuth(req, res, next) {
+    if (req.session && req.session.authenticated) return next();
+    if (req.originalUrl.startsWith("/api/")) return res.status(401).json({ error: "Unauthorized" });
+    res.redirect("/login.html");
+  }
+
+  // ── Auth routes (public — no auth required) ───────────────────────────────
+  app.post("/auth/login", (req, res) => {
+    const username = (req.body?.username || "").trim();
+    const password = (req.body?.password || "").trim();
+    const validUser = (process.env.DASHBOARD_USERNAME || "admin").trim();
+    const validPass = (process.env.DASHBOARD_PASSWORD || "admin123").trim();
+    if (username === validUser && password === validPass) {
+      req.session.authenticated = true;
+      req.session.username = username;
+      return res.json({ ok: true });
+    }
+    return res.status(401).json({ error: "Invalid username or password." });
+  });
+
+  app.post("/auth/logout", (req, res) => {
+    req.session.destroy(() => {
+      res.json({ ok: true });
+    });
+  });
+
+  // Gate root and index.html before serving other static files
+  app.get("/", requireAuth, (req, res) => {
+    res.sendFile(path.join(__dirname, "..", "public", "index.html"));
+  });
+
+  app.get("/index.html", requireAuth, (req, res) => {
+    res.sendFile(path.join(__dirname, "..", "public", "index.html"));
+  });
+
   app.use(express.static(path.join(__dirname, "..", "public")));
 
-  // ── REST API ──────────────────────────────────────────────────────────────
+  // Protect all API routes
+  app.use("/api", requireAuth);
 
   // Bot status + stats
   app.get("/api/status", (req, res) => {
@@ -73,6 +138,16 @@ function createServer(handleControlReplyFn, getSock) {
     });
   });
 
+  // Extract the embedded JPEG thumbnail from a stored pending entry
+  function extractThumbnail(v) {
+    try {
+      const msg = v.mediaMessage && v.mediaMessage.message;
+      if (!msg) return null;
+      const inner = msg.imageMessage || msg.videoMessage || msg.documentMessage || null;
+      return (inner && inner.jpegThumbnail) ? inner.jpegThumbnail : null;
+    } catch (_) { return null; }
+  }
+
   // All pending approvals (without the raw message object — too large)
   app.get("/api/pending", (req, res) => {
     const all = readAll();
@@ -84,6 +159,7 @@ function createServer(handleControlReplyFn, getSock) {
         caption: v.caption,
         createdAt: v.createdAt,
         hasPreview: !!getMediaBuffer(id),
+        thumbnail: extractThumbnail(v),
       }));
     res.json(result);
   });
@@ -106,7 +182,18 @@ function createServer(handleControlReplyFn, getSock) {
     const sock = getSock();
     if (!sock) return res.status(503).json({ error: "Bot not connected" });
     try {
-      await handleControlReplyFn(sock, `YES ${id}`);
+      const { resolveApproval } = require("./approval");
+      const { targetGroups, delayMs } = req.body || {};
+      
+      const options = {};
+      if (Array.isArray(targetGroups) && targetGroups.length > 0) {
+        options.customGroups = targetGroups;
+      }
+      if (typeof delayMs === "number" && delayMs >= 0) {
+        options.delayMs = delayMs * 1000; // convert seconds to ms
+      }
+
+      await resolveApproval(sock, id, "yes", options);
       res.json({ ok: true });
     } catch (e) {
       res.status(500).json({ error: e.message });
@@ -186,6 +273,141 @@ function createServer(handleControlReplyFn, getSock) {
     res.json(activityLog.slice(0, 100));
   });
 
+  // All groups the bot is participating in (for the groups picker)
+  app.get("/api/groups/all", async (req, res) => {
+    const sock = getSock();
+    if (!sock) return res.status(503).json({ error: "Bot not connected" });
+    try {
+      const now = Date.now();
+      // If cache is empty or older than 2 minutes, fetch fresh
+      if (!cachedParticipatingGroups || (now - groupCacheTime > 2 * 60 * 1000)) {
+        const participating = await sock.groupFetchAllParticipating();
+        cachedParticipatingGroups = participating;
+        groupCacheTime = now;
+      }
+      
+      const config = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
+      const targetSet = new Set(config.targetGroups || []);
+      const groups = Object.values(cachedParticipatingGroups).map((g) => ({
+        jid: g.id,
+        name: g.subject || g.id,
+        participantCount: (g.participants || []).length,
+        isTarget: targetSet.has(g.id),
+        isMain: g.id === config.mainGroup,
+      }));
+      groups.sort((a, b) => {
+        if (a.isMain !== b.isMain) return a.isMain ? -1 : 1;
+        if (a.isTarget !== b.isTarget) return a.isTarget ? -1 : 1;
+        return (a.name || "").localeCompare(b.name || "");
+      });
+      res.json(groups);
+    } catch (e) {
+      if (cachedParticipatingGroups) {
+        const config = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
+        const targetSet = new Set(config.targetGroups || []);
+        const groups = Object.values(cachedParticipatingGroups).map((g) => ({
+          jid: g.id,
+          name: g.subject || g.id,
+          participantCount: (g.participants || []).length,
+          isTarget: targetSet.has(g.id),
+          isMain: g.id === config.mainGroup,
+        }));
+        groups.sort((a, b) => {
+          if (a.isMain !== b.isMain) return a.isMain ? -1 : 1;
+          if (a.isTarget !== b.isTarget) return a.isTarget ? -1 : 1;
+          return (a.name || "").localeCompare(b.name || "");
+        });
+        return res.json(groups);
+      }
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Set the active chat JID so the server knows which chat to forward live messages to
+  app.post("/api/chat/watch", (req, res) => {
+    activeChatJid = req.body.jid || null;
+    res.json({ ok: true });
+  });
+
+  // Load recent messages from a group (from in-memory store if available)
+  app.get("/api/chat/:jid", async (req, res) => {
+    const sock = getSock();
+    if (!sock) return res.status(503).json({ error: "Bot not connected" });
+    const jid = decodeURIComponent(req.params.jid);
+    try {
+      // Use the shared in-memory store (persisted to disk) — falls back to empty
+      const msgs = (messageStore[jid] || []).slice(-50);
+      const me = sock.user?.id?.split(":")[0] + "@s.whatsapp.net";
+      const result = (msgs || []).map((m) => {
+        const imageMsg = m.message?.imageMessage;
+        const videoMsg = m.message?.videoMessage;
+        const mediaType = imageMsg ? "image" : videoMsg ? "video" : null;
+        const text =
+          m.message?.conversation ||
+          m.message?.extendedTextMessage?.text ||
+          imageMsg?.caption ||
+          videoMsg?.caption ||
+          (imageMsg ? "" : null) ||
+          (videoMsg ? "" : null) ||
+          (m.message?.stickerMessage ? "[Sticker]" : null) ||
+          (m.message?.audioMessage ? "[Audio]" : null) ||
+          null;
+        if (text === null && !mediaType) return null;
+        return {
+          id: m.key.id,
+          fromMe: m.key.fromMe,
+          sender: m.key.participant || m.key.remoteJid,
+          text: text || "",
+          mediaType,
+          ts: (m.messageTimestamp?.toNumber?.() || m.messageTimestamp || 0) * 1000,
+        };
+      }).filter(Boolean);
+      res.json({ messages: result, me });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Download & stream media for a specific chat message
+  app.get("/api/chat/:jid/media/:msgId", async (req, res) => {
+    const sock = getSock();
+    if (!sock) return res.status(503).json({ error: "Bot not connected" });
+    const jid = decodeURIComponent(req.params.jid);
+    const msgId = req.params.msgId;
+    try {
+      const msgs = (messageStore[jid] || []);
+      const m = msgs.find((msg) => msg.key.id === msgId);
+      if (!m || !m.message) return res.status(404).json({ error: "Message not found" });
+      const isVideo = !!m.message.videoMessage;
+      const isImage = !!m.message.imageMessage;
+      if (!isVideo && !isImage) return res.status(400).json({ error: "Not a media message" });
+      const buf = await downloadMediaMessage(m, "buffer", {}, {
+        logger: { level: "silent", info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {}, child: () => ({ info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {} }) },
+        reuploadRequest: sock.updateMediaMessage,
+      });
+      res.setHeader("Content-Type", isVideo ? "video/mp4" : "image/jpeg");
+      res.setHeader("Cache-Control", "private, max-age=3600");
+      res.send(buf);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Send a message to a group
+  app.post("/api/chat/:jid/send", async (req, res) => {
+    const sock = getSock();
+    if (!sock) return res.status(503).json({ error: "Bot not connected" });
+    const jid = decodeURIComponent(req.params.jid);
+    const { text } = req.body;
+    if (!text || !text.trim()) return res.status(400).json({ error: "text required" });
+    try {
+      await sock.sendMessage(jid, { text: text.trim() });
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // Reset/Relink session
   app.post("/api/session/reset", (req, res) => {
     bus.emit("bot:reset_session");
@@ -204,6 +426,7 @@ function createServer(handleControlReplyFn, getSock) {
         caption: v.caption,
         createdAt: v.createdAt,
         hasPreview: !!getMediaBuffer(id),
+        thumbnail: extractThumbnail(v),
       }));
     socket.emit("init", { status: botStatus, pending, logs: activityLog.slice(0, 50), stats, qr: currentQr });
   });
@@ -215,6 +438,8 @@ function createServer(handleControlReplyFn, getSock) {
     addLog("bot:connected", {});
     io.emit("bot:connected");
     io.emit("status:update", { status: "connected", qr: null });
+    // Pre-fetch in background immediately upon connection
+    setTimeout(() => refreshGroupCache(getSock()), 500);
   });
 
   bus.on("bot:disconnected", () => {
@@ -238,8 +463,11 @@ function createServer(handleControlReplyFn, getSock) {
 
   bus.on("approval:new", (data) => {
     addLog("approval:new", data);
-    // Don't forward the full base64 in the socket event (too large for broadcast)
-    io.emit("approval:new", { ...data, previewBase64: undefined, hasPreview: !!data.previewBase64 });
+    // Get thumbnail from stored pending entry (it's already in the message metadata)
+    const stored = readAll()[data.id];
+    const thumbnail = stored ? extractThumbnail(stored) : null;
+    // Don't forward the full base64 buffer — use thumbnail instead
+    io.emit("approval:new", { ...data, previewBase64: undefined, hasPreview: !!data.previewBase64, thumbnail });
   });
 
   bus.on("approval:resolved", (data) => {
@@ -275,6 +503,34 @@ function createServer(handleControlReplyFn, getSock) {
     addLog("broadcast:complete", data);
     io.emit("broadcast:complete", data);
   });
+
+  bus.on("bot:qr_dataurl", (url) => {
+    io.emit("system:qr", url);
+  });
+
+  bus.on("bot:connected", () => {
+    io.emit("system:connected");
+  });
+
+  // Forward ALL live chat messages to dashboard (frontend filters by group)
+  bus.on("chat:message", (data) => {
+    io.emit("chat:message", data);
+  });
+
+  // ── Watch public/ for file changes and hot-reload connected browsers ──────
+  const PUBLIC_DIR = path.join(__dirname, "..", "public");
+  let reloadDebounce = null;
+  try {
+    fs.watch(PUBLIC_DIR, { recursive: true }, (eventType, filename) => {
+      if (!filename) return;
+      clearTimeout(reloadDebounce);
+      reloadDebounce = setTimeout(() => {
+        io.emit("reload");
+      }, 150);
+    });
+  } catch (e) {
+    // fs.watch not available on all platforms — non-fatal
+  }
 
   httpServer.listen(PORT, () => {
     console.log(`\n🖥️  Dashboard running at → http://localhost:${PORT}\n`);

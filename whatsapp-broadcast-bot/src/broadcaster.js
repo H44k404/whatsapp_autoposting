@@ -23,14 +23,16 @@ function delay(ms) {
  * @param {object} originalMsg the raw message object as received from messages.upsert
  * @returns {Promise<{sent: string[], failed: {jid: string, error: string}[]}>}
  */
-async function broadcastToGroups(sock, originalMsg) {
+async function broadcastToGroups(sock, originalMsg, options = {}) {
   const groups = loadGroups();
-  // Default to 8 seconds if not set in .env to prevent spam bans when broadcasting
-  const delayMs = parseInt(process.env.BROADCAST_DELAY_MS, 10) || 8000;
+  const targetGroups = options.customGroups || groups.targetGroups || [];
+  
+  // Default to 8 seconds if not set in .env, or use custom delay
+  const delayMs = options.delayMs !== undefined ? options.delayMs : (parseInt(process.env.BROADCAST_DELAY_MS, 10) || 8000);
   const sent = [];
   const failed = [];
 
-  logger.info({ groupCount: groups.targetGroups.filter(Boolean).length }, "Downloading media for broadcast (no-forward tag)...");
+  logger.info({ groupCount: targetGroups.filter(Boolean).length }, "Downloading media for broadcast (no-forward tag)...");
 
   let buffer;
   let caption = "";
@@ -59,13 +61,13 @@ async function broadcastToGroups(sock, originalMsg) {
     );
   } catch (err) {
     logger.error({ err: err.message }, "Failed to download media for broadcasting");
-    return { sent: [], failed: groups.targetGroups.map(jid => ({ jid, error: "Media download failed" })) };
+    return { sent: [], failed: targetGroups.map(jid => ({ jid, error: "Media download failed" })) };
   }
 
   logger.info("Media downloaded successfully, starting broadcast loop...");
-  bus.emit("broadcast:start", { count: groups.targetGroups.filter(Boolean).length });
+  bus.emit("broadcast:start", { count: targetGroups.filter(Boolean).length });
 
-  for (const jid of groups.targetGroups) {
+  for (const jid of targetGroups) {
     if (!jid) continue;
     try {
       if (mediaType === "image") {
@@ -93,16 +95,17 @@ async function broadcastToGroups(sock, originalMsg) {
  * Broadcasts a raw media buffer directly to all target groups.
  * Used for media uploaded directly from the dashboard.
  */
-async function broadcastRawMedia(sock, buffer, mediaType, caption) {
+async function broadcastRawMedia(sock, buffer, mediaType, caption, options = {}) {
   const groups = loadGroups();
-  const delayMs = parseInt(process.env.BROADCAST_DELAY_MS, 10) || 8000;
+  const targetGroups = options.customGroups || groups.targetGroups || [];
+  const delayMs = options.delayMs !== undefined ? options.delayMs : (parseInt(process.env.BROADCAST_DELAY_MS, 10) || 8000);
   const sent = [];
   const failed = [];
 
-  logger.info({ groupCount: groups.targetGroups.filter(Boolean).length }, "Starting raw media broadcast...");
-  bus.emit("broadcast:start", { count: groups.targetGroups.filter(Boolean).length });
+  logger.info({ groupCount: targetGroups.filter(Boolean).length }, "Starting raw media broadcast...");
+  bus.emit("broadcast:start", { count: targetGroups.filter(Boolean).length });
 
-  for (const jid of groups.targetGroups) {
+  for (const jid of targetGroups) {
     if (!jid) continue;
     try {
       if (mediaType === "image") {
