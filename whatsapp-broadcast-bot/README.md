@@ -68,6 +68,11 @@ Copy `.env.example` → `.env` if you haven't already, and fill in:
 ```env
 CONTROL_CHAT_JID=947XXXXXXXX@s.whatsapp.net
 MAIN_GROUP_JID=xxxxxxxxxx@g.us
+DASHBOARD_USERNAME=admin
+DASHBOARD_PASSWORD=admin123
+SESSION_SECRET=replace-with-a-strong-secret
+NODE_ENV=production
+DASHBOARD_PORT=3001
 APPROVAL_TIMEOUT_MINUTES=30
 BROADCAST_DELAY_MS=3000
 USE_OLLAMA=true
@@ -75,6 +80,8 @@ OLLAMA_MODEL=llama3.2
 OLLAMA_URL=http://localhost:11434
 LOG_LEVEL=info
 ```
+
+> Use a strong `SESSION_SECRET` in production. The dashboard login is protected by `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD`.
 
 ### 4. Run it
 ```bash

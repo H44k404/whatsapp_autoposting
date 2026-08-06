@@ -119,12 +119,15 @@ loadInitialData();
 /* ── Sections ────────────────────────────────────────────────────── */
 function showSection(name, el) {
   document.querySelectorAll(".content-section").forEach(s => s.classList.remove("active"));
-  document.querySelectorAll(".nav-item").forEach(n => n.classList.remove("active"));
-  document.getElementById("section-" + name).classList.add("active");
+  document.querySelectorAll(".nav-item, .mobile-nav-item").forEach(n => n.classList.remove("active"));
+  const target = document.getElementById("section-" + name);
+  if (target) target.classList.add("active");
   if (el) el.classList.add("active");
   const titles = { overview: "Overview", approvals: "Pending Approvals", activity: "Activity Feed", groups: "Group Manager" };
-  document.getElementById("page-title").textContent = titles[name] || name;
+  const pageTitle = document.getElementById("page-title");
+  if (pageTitle) pageTitle.textContent = titles[name] || name;
   if (name === "groups") loadAllGroups();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 /* ── Status ──────────────────────────────────────────────────────── */
@@ -301,12 +304,19 @@ function buildApprovalCard(item) {
 
   // Always attempt to load the image — onerror adds img-broken class to hide it and retries
   const noPreviewFallback = `<div id="no-prev-${item.id}" style="width:48px;height:48px;fill:rgba(255,255,255,0.2)">${svgIcon}</div>`;
+  const thumbnailSrc = item.thumbnail ? `data:image/jpeg;base64,${item.thumbnail}` : null;
+  const previewSrc = item.hasPreview ? `/api/media/${item.id}` : thumbnailSrc || `/api/media/${item.id}`;
 
-  let mediaTag = `<img src="/api/media/${item.id}" alt=""
+  let mediaTag = `<img src="${previewSrc}" alt=""
     onload="this.classList.remove('img-broken');this.closest('.approval-preview').style.cssText='';var n=document.getElementById('no-prev-${item.id}');if(n)n.remove();"
     onerror="this.classList.add('img-broken');schedulePreviewRetry('${item.id}', '${item.mediaType}')" />`;
-  if (item.mediaType === "video") {
+
+  if (item.mediaType === "video" && item.hasPreview) {
     mediaTag = `<video src="/api/media/${item.id}" controls autoplay loop muted playsinline style="width:100%; max-height:450px; background:#000;"></video>`;
+  } else if (item.mediaType === "video" && thumbnailSrc) {
+    mediaTag = `<img src="${thumbnailSrc}" alt="Video preview"
+      onload="this.classList.remove('img-broken');this.closest('.approval-preview').style.cssText='';var n=document.getElementById('no-prev-${item.id}');if(n)n.remove();"
+      onerror="this.classList.add('img-broken');schedulePreviewRetry('${item.id}', '${item.mediaType}')" />`;
   }
 
   const previewHTML = `<div class="approval-preview" id="preview-wrap-${item.id}">${mediaTag}${noPreviewFallback}<div class="preview-overlay">${item.mediaType}</div></div>`;

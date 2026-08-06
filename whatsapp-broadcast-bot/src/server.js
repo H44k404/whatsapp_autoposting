@@ -8,6 +8,8 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const session = require("express-session");
+const helmet = require("helmet");
+const compression = require("compression");
 const path = require("path");
 const fs = require("fs");
 const bus = require("./events");
@@ -72,6 +74,23 @@ function createServer(handleControlReplyFn, getSock) {
   const io = new Server(httpServer, { cors: { origin: "*" } });
   _io = io;
 
+  if (process.env.NODE_ENV === "production") {
+    app.set("trust proxy", 1);
+  }
+
+  app.disable("x-powered-by");
+  // Use stricter defaults in production; allow inline scripts/styles during
+  // local development so the existing static HTML (which contains small
+  // inline scripts) continues to work without a nonce-based CSP.
+  if (process.env.NODE_ENV === "production") {
+    app.use(helmet());
+  } else {
+    // During local development we disable Helmet's CSP to avoid blocking
+    // the small inline handlers in the static `login.html`. Keep other
+    // Helmet protections enabled (HSTS, XSS filters, etc.).
+    app.use(helmet({ contentSecurityPolicy: false }));
+  }
+  app.use(compression());
   app.use(express.json());
 
   // ── Session middleware ────────────────────────────────────────────────────
@@ -79,7 +98,11 @@ function createServer(handleControlReplyFn, getSock) {
     secret: process.env.SESSION_SECRET || "wa-broadcast-secret-fallback",
     resave: false,
     saveUninitialized: false,
-    cookie: { httpOnly: true }, // Removed maxAge so session expires on browser close
+    cookie: {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+    },
   }));
 
   // ── Auth middleware ───────────────────────────────────────────────────────
@@ -118,7 +141,10 @@ function createServer(handleControlReplyFn, getSock) {
     res.sendFile(path.join(__dirname, "..", "public", "index.html"));
   });
 
-  app.use(express.static(path.join(__dirname, "..", "public")));
+  app.use(express.static(path.join(__dirname, "..", "public"), {
+    maxAge: process.env.NODE_ENV === "production" ? "1d" : 0,
+    immutable: process.env.NODE_ENV === "production",
+  }));
 
   // Protect all API routes
   app.use("/api", requireAuth);
@@ -139,12 +165,23 @@ function createServer(handleControlReplyFn, getSock) {
   });
 
   // Extract the embedded JPEG thumbnail from a stored pending entry
+  function normalizeThumbnail(thumbnail) {
+    if (!thumbnail) return null;
+    if (typeof thumbnail === "string") return thumbnail;
+    if (Buffer.isBuffer(thumbnail)) return thumbnail.toString("base64");
+    if (Array.isArray(thumbnail)) return Buffer.from(thumbnail).toString("base64");
+    if (thumbnail && typeof thumbnail === "object" && Array.isArray(thumbnail.data)) {
+      return Buffer.from(thumbnail.data).toString("base64");
+    }
+    return null;
+  }
+
   function extractThumbnail(v) {
     try {
       const msg = v.mediaMessage && v.mediaMessage.message;
       if (!msg) return null;
       const inner = msg.imageMessage || msg.videoMessage || msg.documentMessage || null;
-      return (inner && inner.jpegThumbnail) ? inner.jpegThumbnail : null;
+      return normalizeThumbnail(inner && inner.jpegThumbnail ? inner.jpegThumbnail : null);
     } catch (_) { return null; }
   }
 
@@ -167,10 +204,16 @@ function createServer(handleControlReplyFn, getSock) {
   // Serve media preview buffer
   app.get("/api/media/:id", (req, res) => {
     const buf = getMediaBuffer(req.params.id);
-    if (!buf) return res.status(404).json({ error: "No preview available" });
-    // Detect if it's a video or image by checking the pending store
     const all = readAll();
     const entry = all[req.params.id];
+    if (!buf) {
+      const thumb = entry ? extractThumbnail(entry) : null;
+      if (thumb) {
+        res.setHeader("Content-Type", "image/jpeg");
+        return res.send(Buffer.from(thumb, "base64"));
+      }
+      return res.status(404).json({ error: "No preview available" });
+    }
     const mime = entry && entry.mediaType === "video" ? "video/mp4" : "image/jpeg";
     res.setHeader("Content-Type", mime);
     res.send(buf);

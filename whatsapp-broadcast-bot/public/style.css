@@ -222,14 +222,6 @@ body {
   opacity: 0.6;
 }
 
-.logo-icon svg {
-  width: 20px;
-  height: 20px;
-  fill: white;
-  position: relative;
-  z-index: 1;
-}
-
 .logo-text {
   display: flex;
   flex-direction: column;
@@ -2539,20 +2531,120 @@ body {
 
 @media (max-width: 860px) {
   .sidebar {
-    display: none;
+    display: flex;
+    position: relative;
+    width: 100%;
+    max-width: 100%;
+    min-height: auto;
+    left: 0;
+    top: 0;
+    border-right: none;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 0 0 24px 24px;
+    margin: 0 0 16px;
+    padding: 18px 14px 12px;
+    background: rgba(10, 14, 20, 0.96);
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.18);
+  }
+
+  .sidebar-logo {
+    padding-bottom: 14px;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .sidebar-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding-bottom: 12px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+
+  .nav-item {
+    flex: 1 1 calc(50% - 10px);
+    min-width: 48%;
+    justify-content: center;
+    padding: 14px 10px;
+    border-radius: 16px;
+    font-size: 13px;
+    text-align: center;
+  }
+
+  .sidebar-footer {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding-top: 10px;
   }
 
   .main {
     margin-left: 0;
+    padding: 0 0 20px;
   }
 
   .topbar {
-    padding: 20px;
+    padding: 18px 18px 14px;
     flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .topbar-right {
+    width: 100%;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .stat-chip {
+    flex: 1 1 calc(50% - 10px);
+    min-width: calc(50% - 10px);
   }
 
   .content-section {
-    padding: 20px;
+    padding: 18px;
+  }
+
+  .approval-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .approval-card {
+    min-width: unset;
+    border-radius: 22px;
+  }
+
+  .approval-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .approval-actions button {
+    width: 100%;
+  }
+
+  .approval-preview {
+    min-height: 220px;
+    border-radius: 20px;
+  }
+
+  .approval-preview img,
+  .approval-preview video {
+    object-fit: cover;
+    height: 220px;
+  }
+
+  .approval-caption {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .approval-card .approval-body {
+    padding: 16px;
   }
 
   .groups-page {
@@ -2561,7 +2653,21 @@ body {
   }
 
   .chat-panel-col {
-    min-height: 500px;
+    min-height: 400px;
+  }
+}
+
+@media (max-width: 560px) {
+  .nav-item {
+    flex: 1 1 100%;
+  }
+
+  .topbar {
+    justify-content: space-between;
+  }
+
+  .stat-chip {
+    min-width: 100%;
   }
 }
 
