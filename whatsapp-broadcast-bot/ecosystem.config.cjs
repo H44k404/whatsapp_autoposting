@@ -3,7 +3,7 @@ module.exports = {
     {
       name: 'whatsapp-broadcast-bot',
       script: 'src/index.js',
-      cwd: '/home/ubuntu/whatapp_automation/whatsapp-broadcast-bot',
+      cwd: '/home/ubuntu/whatsapp_automation/whatsapp-broadcast-bot',
       instances: 1,
       autorestart: true,
       watch: false,

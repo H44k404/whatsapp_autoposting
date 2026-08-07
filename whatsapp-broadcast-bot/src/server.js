@@ -19,6 +19,53 @@ const { downloadMediaMessage } = require("baileys");
 
 const PORT = parseInt(process.env.DASHBOARD_PORT, 10) || 3000;
 const GROUPS_PATH = path.join(__dirname, "..", "config", "groups.json");
+const DASHBOARD_ORIGIN = process.env.DASHBOARD_ORIGIN;
+const AUTH_USERNAME = process.env.DASHBOARD_USERNAME?.trim();
+const AUTH_PASSWORD = process.env.DASHBOARD_PASSWORD?.trim();
+const SESSION_SECRET = (process.env.SESSION_SECRET || "").trim();
+
+if (!SESSION_SECRET) {
+  throw new Error("SESSION_SECRET must be set in .env to secure dashboard sessions.");
+}
+if (!AUTH_USERNAME || !AUTH_PASSWORD) {
+  throw new Error("DASHBOARD_USERNAME and DASHBOARD_PASSWORD must be set in .env.");
+}
+if (AUTH_USERNAME === "admin" || AUTH_PASSWORD === "admin123") {
+  throw new Error("Default dashboard credentials are not permitted.");
+}
+
+const ALLOWED_CORS_ORIGINS = DASHBOARD_ORIGIN
+  ? DASHBOARD_ORIGIN.split(",").map((origin) => origin.trim()).filter(Boolean)
+  : false;
+
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOGIN_BLOCK_DURATION_MS = 15 * 60 * 1000;
+const loginAttempts = new Map();
+
+function getClientIp(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (forwarded) {
+    return forwarded.split(",")[0].trim();
+  }
+  return req.ip || req.connection?.remoteAddress || "unknown";
+}
+
+function getLoginState(ip) {
+  return loginAttempts.get(ip) || { count: 0, blockedUntil: 0 };
+}
+
+function recordLoginAttempt(ip, success) {
+  const now = Date.now();
+  if (success) {
+    loginAttempts.delete(ip);
+    return;
+  }
+
+  const state = getLoginState(ip);
+  const count = state.blockedUntil > now ? state.count : state.count + 1;
+  const blockedUntil = count >= MAX_LOGIN_ATTEMPTS ? now + LOGIN_BLOCK_DURATION_MS : 0;
+  loginAttempts.set(ip, { count, blockedUntil });
+}
 
 // In-memory activity log (last 200 entries)
 const activityLog = [];
@@ -71,7 +118,12 @@ let activeChatJid = null;
 function createServer(handleControlReplyFn, getSock) {
   const app = express();
   const httpServer = http.createServer(app);
-  const io = new Server(httpServer, { cors: { origin: "*" } });
+  const io = new Server(httpServer, {
+    cors: ALLOWED_CORS_ORIGINS
+      ? { origin: ALLOWED_CORS_ORIGINS, credentials: true }
+      : false,
+    allowEIO3: true,
+  });
   _io = io;
 
   if (process.env.NODE_ENV === "production") {
@@ -91,11 +143,10 @@ function createServer(handleControlReplyFn, getSock) {
     app.use(helmet({ contentSecurityPolicy: false }));
   }
   app.use(compression());
-  app.use(express.json());
+  app.use(express.json({ limit: "10kb" }));
 
-  // ── Session middleware ────────────────────────────────────────────────────
-  app.use(session({
-    secret: process.env.SESSION_SECRET || "wa-broadcast-secret-fallback",
+  const sessionMiddleware = session({
+    secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
     cookie: {
@@ -103,7 +154,18 @@ function createServer(handleControlReplyFn, getSock) {
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
     },
-  }));
+  });
+  app.use(sessionMiddleware);
+
+  io.use((socket, next) => {
+    sessionMiddleware(socket.request, {}, (err) => {
+      if (err) return next(err);
+      if (!socket.request.session || !socket.request.session.authenticated) {
+        return next(new Error("Unauthorized"));
+      }
+      next();
+    });
+  });
 
   // ── Auth middleware ───────────────────────────────────────────────────────
   function requireAuth(req, res, next) {
@@ -116,13 +178,21 @@ function createServer(handleControlReplyFn, getSock) {
   app.post("/auth/login", (req, res) => {
     const username = (req.body?.username || "").trim();
     const password = (req.body?.password || "").trim();
-    const validUser = (process.env.DASHBOARD_USERNAME || "admin").trim();
-    const validPass = (process.env.DASHBOARD_PASSWORD || "admin123").trim();
-    if (username === validUser && password === validPass) {
+    const clientIp = getClientIp(req);
+    const attempt = getLoginState(clientIp);
+
+    if (attempt.blockedUntil > Date.now()) {
+      return res.status(429).json({ error: "Too many login attempts. Try again later." });
+    }
+
+    if (username === AUTH_USERNAME && password === AUTH_PASSWORD) {
+      recordLoginAttempt(clientIp, true);
       req.session.authenticated = true;
       req.session.username = username;
       return res.json({ ok: true });
     }
+
+    recordLoginAttempt(clientIp, false);
     return res.status(401).json({ error: "Invalid username or password." });
   });
 

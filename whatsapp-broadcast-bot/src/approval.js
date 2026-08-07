@@ -74,7 +74,7 @@ async function requestApproval(sock, originalMsg, mediaType, caption) {
       deletePending(id);
       bus.emit("approval:expired", { id });
       try {
-        await sock.sendMessage(CONTROL_CHAT, { text: `⌛ Request ${id} expired (no response). Discarded.` });
+        await sock.sendMessage(CONTROL_CHAT, { text: ` Request ${id} expired (no response). Discarded.` });
       } catch (e) {
         logger.error({ err: e.message }, "Failed to send expiry notice");
       }

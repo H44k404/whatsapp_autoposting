@@ -100,18 +100,17 @@ function connectBot() {
           }
 
           // Case 2: reply in the private control chat.
-          // WhatsApp multi-device sometimes sends private replies from a Linked Device ID (@lid)
-          // instead of the standard phone number JID (@s.whatsapp.net).
-          // To fix this, we will accept any private message (not from a group) as a control reply.
+          // Only the configured control chat JID may approve/reject requests.
           const text =
             msg.message.conversation ||
             msg.message.extendedTextMessage?.text ||
             "";
 
           const isPrivateChat = !from.endsWith('@g.us');
+          const isControlChat = from === CONTROL_CHAT || from === `${CONTROL_CHAT.split('@')[0]}@s.whatsapp.net`;
 
-          if (isPrivateChat && !isFromMe && text) {
-            logger.info({ from, text }, "Control chat reply received (via private chat)");
+          if (isPrivateChat && !isFromMe && isControlChat && text) {
+            logger.info({ from, text }, "Control chat reply received");
             await handleControlReply(sock, text);
           }
         } catch (e) {

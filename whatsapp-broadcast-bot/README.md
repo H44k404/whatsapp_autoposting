@@ -68,11 +68,12 @@ Copy `.env.example` → `.env` if you haven't already, and fill in:
 ```env
 CONTROL_CHAT_JID=947XXXXXXXX@s.whatsapp.net
 MAIN_GROUP_JID=xxxxxxxxxx@g.us
-DASHBOARD_USERNAME=admin
-DASHBOARD_PASSWORD=admin123
+DASHBOARD_USERNAME=replace-with-your-username
+DASHBOARD_PASSWORD=replace-with-a-strong-password
 SESSION_SECRET=replace-with-a-strong-secret
 NODE_ENV=production
 DASHBOARD_PORT=3001
+DASHBOARD_ORIGIN=https://your-domain.example
 APPROVAL_TIMEOUT_MINUTES=30
 BROADCAST_DELAY_MS=3000
 USE_OLLAMA=true
