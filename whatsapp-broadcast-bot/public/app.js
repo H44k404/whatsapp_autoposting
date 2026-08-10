@@ -6,6 +6,7 @@ const state = {
   timers: {},      // id → setInterval handle for countdown
   allGroups: [],   // full list from /api/groups/all
   chat: { openJid: null, openName: "", participantCount: 0 },
+  status: "disconnected",
 };
 
 /* ── Socket.IO ───────────────────────────────────────────────────── */
@@ -95,11 +96,18 @@ socket.on("system:connected", () => {
 });
 
 /* ── Initial data load ───────────────────────────────────────────── */
+const titles = {
+  overview: "Overview",
+  approvals: "Approvals",
+  activity: "Activity Feed",
+  groups: "Target Groups",
+};
+
 async function loadInitialData() {
   try {
     const [statusRes, groupsRes] = await Promise.all([
-      fetch("/api/status").then(r => r.json()),
-      fetch("/api/groups").then(r => r.json()),
+      fetch("/api/status").then((r) => r.json()),
+      fetch("/api/groups").then((r) => r.json()),
     ]);
     updateStats({
       sentToday: statusRes.sentToday || 0,
@@ -109,29 +117,47 @@ async function loadInitialData() {
     });
     state.groups = groupsRes;
     setStatus(statusRes.status, statusRes.qr);
-    loadAllGroups(); // Pre-load all groups for the broadcast modal
+    if (statusRes.status === "connected") {
+      loadAllGroups(); // Only fetch group details when the bot is connected
+    }
   } catch (e) {
-    console.warn("Initial data load failed:", e);
+    console.error("loadInitialData failed:", e);
   }
 }
-loadInitialData();
 
-/* ── Sections ────────────────────────────────────────────────────── */
 function showSection(name, el) {
-  document.querySelectorAll(".content-section").forEach(s => s.classList.remove("active"));
-  document.querySelectorAll(".nav-item, .mobile-nav-item").forEach(n => n.classList.remove("active"));
-  const target = document.getElementById("section-" + name);
-  if (target) target.classList.add("active");
-  if (el) el.classList.add("active");
-  const titles = { overview: "Overview", approvals: "Pending Approvals", activity: "Activity Feed", groups: "Group Manager" };
-  const pageTitle = document.getElementById("page-title");
+  // Update nav active states (sidebar + mobile)
+  document.querySelectorAll('.nav-item, .mobile-nav-item').forEach((n) => {
+    try { n.classList.remove('active'); } catch (e) {}
+    if (n.dataset && n.dataset.section === name) n.classList.add('active');
+  });
+
+  // Update sidebar links
+  document.querySelectorAll('.nav-item').forEach((n) => {
+    n.classList.toggle('active', n.dataset.section === name);
+  });
+
+  // Show the chosen content section
+  document.querySelectorAll('.content-section').forEach((s) => s.classList.remove('active'));
+  const section = document.getElementById(`section-${name}`);
+  if (section) section.classList.add('active');
+
+  // Update page title
+  const pageTitle = document.getElementById('page-title');
   if (pageTitle) pageTitle.textContent = titles[name] || name;
-  if (name === "groups") loadAllGroups();
+
+  // If switching to groups, ensure list is loaded
+  if (name === 'groups') loadAllGroups();
+
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
+// Initialize UI on load
+try { loadInitialData(); } catch (e) { setTimeout(loadInitialData, 100); }
+
 /* ── Status ──────────────────────────────────────────────────────── */
 function setStatus(status, qr) {
+  state.status = status;
   const dot = document.getElementById("status-dot");
   const text = document.getElementById("status-text");
   const pill = document.getElementById("status-pill");
@@ -623,11 +649,19 @@ function clearActivityUI() {
 async function loadAllGroups() {
   const list = document.getElementById("all-groups-list");
   const status = document.getElementById("groups-list-status");
+  if (!list) return;
+
+  if (state.status !== "connected") {
+    list.innerHTML = `<div class="empty-state"><div class="empty-sub">Bot is offline — group list is unavailable until connection is restored.</div></div>`;
+    return;
+  }
+
   if (status) status.textContent = "Loading groups…";
-  if (list) list.innerHTML = `<div class="empty-state"><div class="empty-sub" id="groups-list-status">Loading groups…</div></div>`;
+  list.innerHTML = `<div class="empty-state"><div class="empty-sub" id="groups-list-status">Loading groups…</div></div>`;
+
   try {
     const res = await fetch("/api/groups/all");
-    if (!res.ok) throw new Error((await res.json()).error || "Failed");
+    if (!res.ok) throw new Error((await res.json()).error || "Failed to load groups");
     state.allGroups = await res.json();
     renderGroupPicker(state.allGroups);
   } catch (e) {

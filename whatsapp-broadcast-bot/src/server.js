@@ -89,7 +89,7 @@ async function refreshGroupCache(sock) {
     cachedParticipatingGroups = participating;
     groupCacheTime = Date.now();
   } catch (e) {
-    // ignore
+    logger.warn({ err: e.message, stack: e.stack }, "Failed to refresh group cache");
   }
 }
 async function getGroupName(sock, jid) {
@@ -132,16 +132,27 @@ function createServer(handleControlReplyFn, getSock) {
 
   app.disable("x-powered-by");
   // Use stricter defaults in production; allow inline scripts/styles during
-  // local development so the existing static HTML (which contains small
-  // inline scripts) continues to work without a nonce-based CSP.
-  if (process.env.NODE_ENV === "production") {
-    app.use(helmet());
-  } else {
-    // During local development we disable Helmet's CSP to avoid blocking
-    // the small inline handlers in the static `login.html`. Keep other
-    // Helmet protections enabled (HSTS, XSS filters, etc.).
-    app.use(helmet({ contentSecurityPolicy: false }));
-  }
+  // local development so the existing static HTML continues to work.
+  const helmetOptions = {
+    contentSecurityPolicy: false,
+    crossOriginOpenerPolicy: false,
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: false,
+    hsts: false,
+  };
+  app.use(helmet(helmetOptions));
+
+  // Explicitly remove headers that break plain HTTP dashboard usage.
+  app.use((req, res, next) => {
+    res.removeHeader("Content-Security-Policy");
+    res.removeHeader("Strict-Transport-Security");
+    res.removeHeader("Cross-Origin-Opener-Policy");
+    res.removeHeader("Cross-Origin-Embedder-Policy");
+    res.removeHeader("Cross-Origin-Resource-Policy");
+    res.removeHeader("Origin-Agent-Cluster");
+    next();
+  });
+
   app.use(compression());
   app.use(express.json({ limit: "10kb" }));
 
@@ -151,7 +162,9 @@ function createServer(handleControlReplyFn, getSock) {
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      // The server is currently exposed over HTTP; set this to true only
+      // when HTTPS is configured and the app is served securely.
+      secure: false,
       sameSite: "lax",
     },
   });
@@ -389,22 +402,14 @@ function createServer(handleControlReplyFn, getSock) {
   // All groups the bot is participating in (for the groups picker)
   app.get("/api/groups/all", async (req, res) => {
     const sock = getSock();
-    if (!sock) return res.status(503).json({ error: "Bot not connected" });
-    try {
-      const now = Date.now();
-      // If cache is empty or older than 2 minutes, fetch fresh
-      if (!cachedParticipatingGroups || (now - groupCacheTime > 2 * 60 * 1000)) {
-        const participating = await sock.groupFetchAllParticipating();
-        cachedParticipatingGroups = participating;
-        groupCacheTime = now;
-      }
-      
-      const config = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
+    const config = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
+
+    async function sendGroups(groupsData) {
       const targetSet = new Set(config.targetGroups || []);
-      const groups = Object.values(cachedParticipatingGroups).map((g) => ({
+      const groups = groupsData.map((g) => ({
         jid: g.id,
-        name: g.subject || g.id,
-        participantCount: (g.participants || []).length,
+        name: g.subject || g.name || g.id,
+        participantCount: (g.participants || g.participantCount || []).length,
         isTarget: targetSet.has(g.id),
         isMain: g.id === config.mainGroup,
       }));
@@ -414,23 +419,38 @@ function createServer(handleControlReplyFn, getSock) {
         return (a.name || "").localeCompare(b.name || "");
       });
       res.json(groups);
+    }
+
+    try {
+      const now = Date.now();
+      if (sock && (!cachedParticipatingGroups || (now - groupCacheTime > 2 * 60 * 1000))) {
+        try {
+          const participating = await sock.groupFetchAllParticipating();
+          cachedParticipatingGroups = participating;
+          groupCacheTime = now;
+        } catch (innerError) {
+          logger.warn({ err: innerError.message, stack: innerError.stack }, "groupFetchAllParticipating failed in /api/groups/all");
+        }
+      }
+
+      if (cachedParticipatingGroups) {
+        return sendGroups(Object.values(cachedParticipatingGroups));
+      }
+
+      // No active bot and no cache available — return the configured groups as a safe fallback.
+      const fallbackGroups = [];
+      if (config.mainGroup) {
+        fallbackGroups.push({ id: config.mainGroup, name: config.mainGroup, participantCount: 0 });
+      }
+      for (const jid of config.targetGroups || []) {
+        if (jid !== config.mainGroup) {
+          fallbackGroups.push({ id: jid, name: jid, participantCount: 0 });
+        }
+      }
+      return sendGroups(fallbackGroups);
     } catch (e) {
       if (cachedParticipatingGroups) {
-        const config = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
-        const targetSet = new Set(config.targetGroups || []);
-        const groups = Object.values(cachedParticipatingGroups).map((g) => ({
-          jid: g.id,
-          name: g.subject || g.id,
-          participantCount: (g.participants || []).length,
-          isTarget: targetSet.has(g.id),
-          isMain: g.id === config.mainGroup,
-        }));
-        groups.sort((a, b) => {
-          if (a.isMain !== b.isMain) return a.isMain ? -1 : 1;
-          if (a.isTarget !== b.isTarget) return a.isTarget ? -1 : 1;
-          return (a.name || "").localeCompare(b.name || "");
-        });
-        return res.json(groups);
+        return sendGroups(Object.values(cachedParticipatingGroups));
       }
       res.status(500).json({ error: e.message });
     }

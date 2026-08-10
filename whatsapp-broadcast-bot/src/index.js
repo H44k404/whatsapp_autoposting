@@ -43,7 +43,7 @@ const getSock = () => currentSock;
 createServer(handleControlReply, getSock);
 
 function connectBot() {
-  startBot(async (sock) => {
+  return startBot(async (sock) => {
     currentSock = sock;
     bus.emit("bot:connected");
 
@@ -118,6 +118,9 @@ function connectBot() {
         }
       }
     });
+  }).catch((err) => {
+    logger.error({ err: err.message, stack: err.stack }, "Failed to start WhatsApp bot");
+    bus.emit("bot:disconnected");
   });
 }
 

@@ -67,14 +67,22 @@ async function broadcastToGroups(sock, originalMsg, options = {}) {
   logger.info("Media downloaded successfully, starting broadcast loop...");
   bus.emit("broadcast:start", { count: targetGroups.filter(Boolean).length });
 
-  for (const jid of targetGroups) {
+    for (const jid of targetGroups) {
     if (!jid) continue;
     try {
+      // Build send params and prefer using original message metadata when available
+      const sendParams = { caption };
       if (mediaType === "image") {
-        await sock.sendMessage(jid, { image: buffer, caption });
+        sendParams.image = buffer;
       } else {
-        await sock.sendMessage(jid, { video: buffer, caption });
+        sendParams.video = buffer;
+        const vmsg = originalMsg?.message?.videoMessage || {};
+        if (vmsg.fileName) sendParams.fileName = vmsg.fileName;
+        // Provide a sensible default mimetype so Baileys treats this as a video upload
+        sendParams.mimetype = vmsg.mimetype || "video/mp4";
       }
+
+      await sock.sendMessage(jid, sendParams);
       logger.info(`✅ Sent to ${jid}`);
       sent.push(jid);
       bus.emit("broadcast:sent", { jid });
@@ -108,11 +116,17 @@ async function broadcastRawMedia(sock, buffer, mediaType, caption, options = {})
   for (const jid of targetGroups) {
     if (!jid) continue;
     try {
+      const sendParams = { caption };
       if (mediaType === "image") {
-        await sock.sendMessage(jid, { image: buffer, caption });
+        sendParams.image = buffer;
       } else {
-        await sock.sendMessage(jid, { video: buffer, caption });
+        sendParams.video = buffer;
+        // Raw media from dashboard: provide defaults so WA treats it as a proper video
+        sendParams.fileName = options.fileName || "video.mp4";
+        sendParams.mimetype = options.mimetype || "video/mp4";
       }
+
+      await sock.sendMessage(jid, sendParams);
       logger.info(`✅ Sent to ${jid}`);
       sent.push(jid);
       bus.emit("broadcast:sent", { jid });
