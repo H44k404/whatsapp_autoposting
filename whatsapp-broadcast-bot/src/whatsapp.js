@@ -13,10 +13,7 @@ const logger = require("./utils/logger");
 const bus = require("./events");
 
 const STORE_PATH = path.join(__dirname, "..", "data", "message-store.json");
-const AUTH_PATH = path.join(__dirname, "..", "auth");
 const silentLogger = pino({ level: "silent" });
-let reconnectTimer = null;
-let activeSocket = null;
 
 // ── Simple message store ─────────────────────────────────────────────────────
 // Maps jid → Array of message objects (most-recent last, capped at 200 per chat)
@@ -108,8 +105,6 @@ async function startBot(onReady) {
     printQRInTerminal: false,
   });
 
-  activeSocket = sock;
-
   // ── Capture incoming messages into our store ────────────────────────────────
   sock.ev.on("messages.upsert", ({ messages, type }) => {
     for (const m of messages) {
@@ -133,45 +128,19 @@ async function startBot(onReady) {
     }
 
     if (connection === "close") {
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
       logger.warn({ statusCode, shouldReconnect }, "Connection closed.");
       if (shouldReconnect) {
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null;
+        setTimeout(() => {
           startBot(onReady).catch((err) => {
             logger.error({ err: err.message, stack: err.stack }, "Failed to reconnect WhatsApp socket");
             bus.emit("bot:disconnected");
           });
         }, 3000);
       } else {
-        logger.error("Logged out from WhatsApp. Clearing auth state and requesting a fresh QR scan to reconnect.");
-        // Attempt to remove the saved auth state so the operator can re-scan the QR code.
-        try {
-          if (fs.existsSync(AUTH_PATH)) {
-            fs.rmSync(AUTH_PATH, { recursive: true, force: true });
-            logger.warn({ authPath: AUTH_PATH }, "Auth folder deleted to allow fresh login");
-          }
-        } catch (err) {
-          logger.warn({ err: err.message }, "Auth folder delete failed or did not exist.");
-        }
-
+        logger.error("Logged out from WhatsApp. Delete the ./auth folder and re-scan the QR code to reconnect.");
         bus.emit("bot:logged_out");
-
-        activeSocket = null;
-
-        // Restart the bot to prompt a new QR code for login.
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null;
-          startBot(onReady).catch((err) => {
-            logger.error({ err: err.message, stack: err.stack }, "Failed to restart WhatsApp socket after clearing auth");
-            bus.emit("bot:disconnected");
-          });
-        }, 1000);
       }
     } else if (connection === "open") {
       logger.info("✅ Connected to WhatsApp");

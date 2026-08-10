@@ -45,12 +45,10 @@ createServer(handleControlReply, getSock);
 function connectBot() {
   return startBot(async (sock) => {
     currentSock = sock;
-    bus.emit("bot:connected");
 
     sock.ev.on("connection.update", ({ connection }) => {
       if (connection === "close") {
         currentSock = null;
-        bus.emit("bot:disconnected");
       }
     });
 

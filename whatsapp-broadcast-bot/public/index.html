@@ -13,9 +13,6 @@
   <link rel="manifest" href="/manifest.json" />
   <link rel="apple-touch-icon" href="/logo.png" />
   <meta name="theme-color" content="#090b10" />
-  <meta http-equiv="Cache-control" content="no-cache, no-store, must-revalidate" />
-  <meta http-equiv="Pragma" content="no-cache" />
-  <meta http-equiv="Expires" content="0" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -419,21 +416,8 @@
     </div>
   </div>
 
-  <script>
-    window.showSection = window.showSection || function(name) {
-      const titles = { overview: 'Overview', approvals: 'Approvals', activity: 'Activity Feed', groups: 'Target Groups' };
-      document.querySelectorAll('.nav-item, .mobile-nav-item').forEach((n) => {
-        n.classList.toggle('active', n.dataset?.section === name);
-      });
-      document.querySelectorAll('.content-section').forEach((s) => s.classList.remove('active'));
-      const section = document.getElementById(`section-${name}`);
-      if (section) section.classList.add('active');
-      const pageTitle = document.getElementById('page-title');
-      if (pageTitle) pageTitle.textContent = titles[name] || name;
-    };
-  </script>
   <script src="/socket.io/socket.io.js"></script>
-  <script src="app.js?v=4"></script>
+  <script src="app.js"></script>
 </body>
 
 </html>
