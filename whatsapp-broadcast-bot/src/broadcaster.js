@@ -77,7 +77,8 @@ async function broadcastToGroups(sock, originalMsg, options = {}) {
       } else {
         sendParams.video = buffer;
         const vmsg = originalMsg?.message?.videoMessage || {};
-        if (vmsg.fileName) sendParams.fileName = vmsg.fileName;
+        sendParams.fileName = vmsg.fileName || "video.mp4";
+        if (vmsg.jpegThumbnail) sendParams.jpegThumbnail = vmsg.jpegThumbnail;
         // Provide a sensible default mimetype so Baileys treats this as a video upload
         sendParams.mimetype = vmsg.mimetype || "video/mp4";
       }
