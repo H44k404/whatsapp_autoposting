@@ -13,6 +13,7 @@ const compression = require("compression");
 const path = require("path");
 const fs = require("fs");
 const bus = require("./events");
+const logger = require("./utils/logger");
 const { readAll, getMediaBuffer } = require("./store");
 const { messageStore } = require("./whatsapp");
 const { downloadMediaMessage } = require("baileys");
@@ -81,34 +82,20 @@ const stats = { sentToday: 0, failed: 0 };
 const groupNameCache = new Map();
 let cachedParticipatingGroups = null;
 let groupCacheTime = 0;
-let groupCacheRefreshPromise = null;
 
 async function refreshGroupCache(sock) {
   if (!sock) return;
-  if (groupCacheRefreshPromise) return groupCacheRefreshPromise;
-  groupCacheRefreshPromise = (async () => {
-    try {
-      const participating = await sock.groupFetchAllParticipating();
-      cachedParticipatingGroups = participating;
-      groupCacheTime = Date.now();
-    } catch (e) {
-      logger.warn({ err: e.message, stack: e.stack }, "Failed to refresh group cache");
-    } finally {
-      groupCacheRefreshPromise = null;
-    }
-  })();
-  return groupCacheRefreshPromise;
+  try {
+    const participating = await sock.groupFetchAllParticipating();
+    cachedParticipatingGroups = participating;
+    groupCacheTime = Date.now();
+  } catch (e) {
+    logger.warn({ err: e.message, stack: e.stack }, "Failed to refresh group cache");
+  }
 }
-
 async function getGroupName(sock, jid) {
   if (!jid) return "";
   if (groupNameCache.has(jid)) return groupNameCache.get(jid);
-  if (cachedParticipatingGroups && cachedParticipatingGroups[jid]) {
-    const group = cachedParticipatingGroups[jid];
-    const name = group.subject || group.name || jid;
-    groupNameCache.set(jid, name);
-    return name;
-  }
   if (!sock) return jid; // fallback if disconnected
   try {
     const meta = await sock.groupMetadata(jid);
@@ -125,7 +112,6 @@ async function getGroupName(sock, jid) {
 let _io = null;
 let botStatus = "disconnected";
 let currentQr = null;
-let lastBotState = null;
 
 // Track which group chat the dashboard has open (for real-time forwarding)
 let activeChatJid = null;
@@ -439,16 +425,20 @@ function createServer(handleControlReplyFn, getSock) {
     try {
       const now = Date.now();
       if (sock && (!cachedParticipatingGroups || (now - groupCacheTime > 2 * 60 * 1000))) {
-        refreshGroupCache(sock).catch((innerError) => {
-          logger.warn({ err: innerError?.message || innerError, stack: innerError?.stack }, "groupFetchAllParticipating failed in /api/groups/all");
-        });
+        try {
+          const participating = await sock.groupFetchAllParticipating();
+          cachedParticipatingGroups = participating;
+          groupCacheTime = now;
+        } catch (innerError) {
+          logger.warn({ err: innerError.message, stack: innerError.stack }, "groupFetchAllParticipating failed in /api/groups/all");
+        }
       }
 
       if (cachedParticipatingGroups) {
         return sendGroups(Object.values(cachedParticipatingGroups));
       }
 
-      // No cache yet. Return the configured groups as a fast fallback while the cache refreshes in the background.
+      // No active bot and no cache available — return the configured groups as a safe fallback.
       const fallbackGroups = [];
       if (config.mainGroup) {
         fallbackGroups.push({ id: config.mainGroup, name: config.mainGroup, participantCount: 0 });
@@ -576,14 +566,7 @@ function createServer(handleControlReplyFn, getSock) {
   });
 
   // ── Forward internal bus events → Socket.IO ──────────────────────────────
-  function emitBotState(state) {
-    if (lastBotState === state) return false;
-    lastBotState = state;
-    return true;
-  }
-
   bus.on("bot:connected", () => {
-    if (!emitBotState("connected")) return;
     botStatus = "connected";
     currentQr = null;
     addLog("bot:connected", {});
@@ -594,7 +577,6 @@ function createServer(handleControlReplyFn, getSock) {
   });
 
   bus.on("bot:disconnected", () => {
-    if (!emitBotState("disconnected")) return;
     botStatus = "disconnected";
     currentQr = null;
     addLog("bot:disconnected", {});
@@ -603,7 +585,6 @@ function createServer(handleControlReplyFn, getSock) {
   });
 
   bus.on("bot:connecting", () => {
-    if (!emitBotState("connecting")) return;
     botStatus = "connecting";
     currentQr = null;
     io.emit("status:update", { status: "connecting", qr: null });

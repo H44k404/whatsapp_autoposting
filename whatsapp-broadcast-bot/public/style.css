@@ -3,7 +3,6 @@
    Design system: deep-space dark theme, glassmorphism, aurora ambience,
    physics-based motion. Every animation is tied to a real state change.
    ════════════════════════════════════════════════════════════════════════ */
-
 *,
 *::before,
 *::after {
@@ -2805,6 +2804,76 @@ body {
 
   .stat-chip {
     min-width: 100%;
+  }
+
+  .main {
+    padding-bottom: 120px;
+  }
+
+  .content-section {
+    padding-bottom: 220px;
+  }
+
+  /* Hide the Overview stat cards on small mobile screens */
+  .stats-row {
+    display: none;
+  }
+
+  .mobile-nav-bar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    margin: 0;
+    width: 100%;
+    border-radius: 0;
+    padding: 10px 14px;
+    z-index: 9999;
+    box-shadow: 0 -16px 40px rgba(0, 0, 0, 0.35);
+    background: rgba(8, 12, 18, 0.98);
+  }
+
+  .mobile-nav-item {
+    padding: 10px 6px;
+    font-size: 11px;
+  }
+
+  /* Disable sticky topbar and hide page title on small screens */
+  .topbar {
+    position: static !important;
+    box-shadow: none !important;
+    padding: 12px 14px !important;
+  }
+
+  .topbar .h1,
+  .page-title {
+    display: none !important;
+    visibility: hidden !important;
+    height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+  }
+
+  /* Stack overview cards and keep them behind the fixed bottom nav */
+  #section-overview .glass-card,
+  #section-overview .approval-grid,
+  #section-overview .approval-card {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin-bottom: 16px !important;
+  }
+
+  /* Override the inline two-column grid in the overview to a single column */
+  #section-overview > div[style] {
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    gap: 16px !important;
+  }
+
+  /* Reduce activity-feed height on small screens so it doesn't overlap nav */
+  .activity-feed {
+    max-height: calc(100vh - 360px) !important;
   }
 }
 

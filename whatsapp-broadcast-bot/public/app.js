@@ -1,5 +1,4 @@
 /* ── State ───────────────────────────────────────────────────────── */
-/* ── State ───────────────────────────────────────────────────────── */
 const state = {
   approvals: {},   // id → { id, mediaType, caption, createdAt, hasPreview }
   stats: { sentToday: 0, pending: 0, failed: 0, targetGroupCount: 0 },
@@ -9,33 +8,10 @@ const state = {
   chat: { openJid: null, openName: "", participantCount: 0 },
   status: "disconnected",
 };
-function showSection(section, button) {
-  document.querySelectorAll(".content-section").forEach((el) => {
-    el.style.display = el.id === `section-${section}` ? "block" : "none";
-  });
-
-  document.querySelectorAll(".nav-item, .mobile-nav-item").forEach((el) => {
-    el.classList.toggle("active", el.dataset.section === section);
-  });
-
-  const pageTitle = document.getElementById("page-title");
-  if (pageTitle) {
-    const titleMap = {
-      overview: "Overview",
-      approvals: "Approvals",
-      activity: "Activity Feed",
-      groups: "Target Groups",
-    };
-    pageTitle.textContent = titleMap[section] || section;
-  }
-
-  if (button) {
-    button.classList.add("active");
-  }
-}
 
 /* ── Socket.IO ───────────────────────────────────────────────────── */
 const socket = io();
+
 socket.on("init", ({ status, pending, logs, stats, qr }) => {
   setStatus(status, qr);
   // Rebuild approval state
@@ -47,9 +23,6 @@ socket.on("init", ({ status, pending, logs, stats, qr }) => {
   for (const entry of [...logs].reverse()) addActivityItem(entry.type, entry.data, entry.ts);
   // Update stats from server
   if (stats) updateStats({ ...stats, pending: pending.length });
-  if (status === "connected") {
-    loadAllGroups();
-  }
 });
 
 socket.on("bot:connected", () => {
@@ -137,12 +110,15 @@ async function loadInitialData() {
     });
     state.groups = groupsRes;
     setStatus(statusRes.status, statusRes.qr);
-    if (statusRes.status === "connected") {
-      loadAllGroups(); // Only fetch group details when the bot is connected
-    }
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+      if (statusRes.status === "connected") {
+        loadAllGroups(); // Only fetch group details when the bot is connected
+      }
+  const pageTitle = document.getElementById("page-title");
+  if (pageTitle) pageTitle.textContent = titles[name] || name;
+  if (name === "groups") loadAllGroups();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
   } catch (e) {
-      console.error(e);
+    console.error('loadInitialData failed', e);
   }
 }
 
@@ -152,17 +128,19 @@ function setStatus(status, qr) {
   const dot = document.getElementById("status-dot");
   const text = document.getElementById("status-text");
   const pill = document.getElementById("status-pill");
-  dot.className = "status-dot " + status;
+  if (dot) dot.className = "status-dot " + status;
 
-  if (status === "connected") {
-    text.textContent = "Connected";
-    pill.style.borderColor = "rgba(16, 185, 129, 0.3)";
-  } else if (status === "connecting") {
-    text.textContent = "Connecting...";
-    pill.style.borderColor = "rgba(99, 102, 241, 0.3)";
-  } else {
-    text.textContent = "Disconnected";
-    pill.style.borderColor = "rgba(239, 68, 68, 0.3)";
+  if (text && pill) {
+    if (status === "connected") {
+      text.textContent = "Connected";
+      pill.style.borderColor = "rgba(16, 185, 129, 0.3)";
+    } else if (status === "connecting") {
+      text.textContent = "Connecting...";
+      pill.style.borderColor = "rgba(99, 102, 241, 0.3)";
+    } else {
+      text.textContent = "Disconnected";
+      pill.style.borderColor = "rgba(239, 68, 68, 0.3)";
+    }
   }
 
   // Handle overview Setup QR panel visibility
@@ -181,9 +159,72 @@ function setStatus(status, qr) {
       qrContainer.innerHTML = `<div style="color: var(--text-muted); font-size: 13px; text-align: center; padding: 20px;">Establishing connection...</div>`;
     } else {
       sessionCard.style.display = "none";
+      // Ensure any previously rendered QR is cleared when connected
+      try { qrContainer.innerHTML = ''; } catch (e) { /* noop */ }
     }
   }
 }
+
+/* Make showSection available globally for inline onclick handlers */
+function showSection(name, navEl) {
+  const content = document.getElementById(`section-${name}`) || document.querySelector(`.content-section[data-section="${name}"]`) || document.querySelector(`[data-section="${name}"]`);
+  if (!content) return;
+
+  // Hide all content sections, show the requested one
+  document.querySelectorAll('.content-section').forEach(s => s.classList.remove('active'));
+  content.classList.add('active');
+
+  // Update navigation active state (sidebar + mobile)
+  document.querySelectorAll('.mobile-nav-item, .nav-item').forEach(btn => {
+    const target = btn.dataset.section || btn.getAttribute('data-section') || btn.dataset.target;
+    if (target === name) btn.classList.add('active'); else btn.classList.remove('active');
+  });
+
+  // If caller provided a specific nav element, ensure it's marked active too
+  if (navEl && navEl.classList) {
+    document.querySelectorAll('.mobile-nav-item, .nav-item').forEach(b => b.classList.remove('active'));
+    navEl.classList.add('active');
+  }
+
+  // trigger load hooks for some sections
+  if (name === 'groups') loadAllGroups();
+  if (name === 'approvals') renderApprovals();
+
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// Attach event listeners instead of relying on inline onclick attributes
+document.addEventListener('DOMContentLoaded', () => {
+  // Nav buttons (sidebar + mobile)
+  document.querySelectorAll('.nav-item, .mobile-nav-item').forEach(btn => {
+    // ensure cursor is interactive
+    btn.style.cursor = 'pointer';
+    btn.addEventListener('click', (e) => {
+      const s = btn.dataset.section;
+      if (s) showSection(s, btn);
+    });
+  });
+
+  // Card links that navigate to full views (have data-section)
+  document.querySelectorAll('.card-link[data-section]').forEach(a => {
+    a.addEventListener('click', (e) => {
+      const s = a.dataset.section;
+      if (s) showSection(s, a);
+    });
+  });
+
+  // Ensure initial active section is synced
+  const initial = document.querySelector('.nav-item.active[data-section], .mobile-nav-item.active[data-section]');
+  if (initial && initial.dataset.section) showSection(initial.dataset.section, initial);
+  // Render current UI state now that DOM is ready
+  try { renderApprovals(); } catch (e) { /* noop */ }
+  try { renderMiniApprovals(); } catch (e) { /* noop */ }
+  try { updatePendingCount(); } catch (e) { /* noop */ }
+  try { updateStatsUI(); } catch (e) { /* noop */ }
+});
+
+// expose to global scope so inline handlers work even if this file is loaded as a module
+window.showSection = showSection;
 
 async function doLogout() {
   showConfirmModal("Log Out", "Are you sure you want to log out of the dashboard?", async () => {
@@ -280,8 +321,10 @@ function updatePendingCount() {
   state.stats.pending = count;
   updateStatsUI();
   const badge = document.getElementById("badge-pending");
-  badge.textContent = count;
-  badge.className = "badge" + (count > 0 ? " visible" : "");
+  if (badge) {
+    badge.textContent = count;
+    badge.className = "badge" + (count > 0 ? " visible" : "");
+  }
 }
 
 function setText(id, val) {
@@ -293,6 +336,11 @@ function setText(id, val) {
 function renderApprovals() {
   const grid = document.getElementById("approval-grid");
   const approvals = Object.values(state.approvals);
+
+  if (!grid) {
+    console.warn('renderApprovals: approval-grid element not found');
+    return;
+  }
 
   if (approvals.length === 0) {
     grid.innerHTML = `<div class="empty-state full">
@@ -406,6 +454,10 @@ function startCountdown(id, createdAt) {
 function renderMiniApprovals() {
   const list = document.getElementById("ov-approval-list");
   const approvals = Object.values(state.approvals);
+  if (!list) {
+    console.warn('renderMiniApprovals: ov-approval-list element not found');
+    return;
+  }
   if (approvals.length === 0) {
     list.innerHTML = `<div class="empty-state">No pending approvals</div>`;
     return;
@@ -642,19 +694,20 @@ async function loadAllGroups() {
   const status = document.getElementById("groups-list-status");
   if (!list) return;
 
-  try {
-    if (state.status !== "connected") {
-      list.innerHTML = `<div class="empty-state"><div class="empty-sub">Bot is offline — group list is unavailable until connection is restored.</div></div>`;
-      return;
-    }
+  if (state.status !== "connected") {
+    list.innerHTML = `<div class="empty-state"><div class="empty-sub">Bot is offline — group list is unavailable until connection is restored.</div></div>`;
+    return;
+  }
 
+  try {
     if (status) status.textContent = "Loading groups…";
     list.innerHTML = `<div class="empty-state"><div class="empty-sub" id="groups-list-status">Loading groups…</div></div>`;
 
-    const res = await fetch("/api/groups/all");
-    if (!res.ok) throw new Error("Failed to load groups");
+    const res = await fetch('/api/groups/all');
+    const payload = await res.json();
+    if (!res.ok) throw new Error(payload.error || 'Failed to load groups');
 
-    state.allGroups = await res.json();
+    state.allGroups = payload;
     renderGroupPicker(state.allGroups);
   } catch (e) {
     if (list) list.innerHTML = `<div class="empty-state"><div class="empty-sub" style="color:var(--danger)">${escapeHtml(e.message)}</div></div>`;
@@ -936,9 +989,3 @@ function showToast(title, body, type = "") {
     setTimeout(() => toast.remove(), 400);
   }, 4000);
 }
-
-document.addEventListener("DOMContentLoaded", () => {
-  loadInitialData().catch(() => {
-    // Silent failure if the initial data load cannot complete immediately.
-  });
-});

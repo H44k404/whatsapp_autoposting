@@ -17,6 +17,20 @@
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <link rel="stylesheet" href="style.css" />
+  <style>
+    @media (max-width: 560px) {
+      /* Override: ensure overview stats are hidden on small screens */
+      #section-overview .stats-row,
+      .stats-row {
+        display: none !important;
+        visibility: hidden !important;
+        height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        overflow: hidden !important;
+      }
+    }
+  </style>
 </head>
 
 <body>
@@ -58,13 +72,13 @@
     </div>
 
     <nav class="sidebar-nav">
-      <a class="nav-item active" data-section="overview" onclick="showSection('overview', this)">
+      <a class="nav-item active" data-section="overview">
         <svg viewBox="0 0 24 24">
           <path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z" />
         </svg>
         Overview
       </a>
-      <a class="nav-item" data-section="approvals" onclick="showSection('approvals', this)">
+      <a class="nav-item" data-section="approvals">
         <svg viewBox="0 0 24 24">
           <path
             d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2zm-2 1H8v-6c0-2.48 1.51-4.5 4-4.5s4 2.02 4 4.5v6z" />
@@ -72,14 +86,14 @@
         Approvals
         <span class="badge" id="badge-pending">0</span>
       </a>
-      <a class="nav-item" data-section="activity" onclick="showSection('activity', this)">
+      <a class="nav-item" data-section="activity">
         <svg viewBox="0 0 24 24">
           <path
             d="M13 2.05v3.03c3.39.49 6 3.39 6 6.92 0 .9-.18 1.75-.48 2.54l2.6 1.53c.56-1.24.88-2.62.88-4.07 0-5.18-3.95-9.45-9-9.95zM12 19c-3.87 0-7-3.13-7-7 0-3.53 2.61-6.43 6-6.92V2.05c-5.06.5-9 4.76-9 9.95 0 5.52 4.47 10 9.99 10 3.31 0 6.24-1.61 8.06-4.09l-2.6-1.53C16.17 17.98 14.21 19 12 19z" />
         </svg>
         Activity Feed
       </a>
-      <a class="nav-item" data-section="groups" onclick="showSection('groups', this)">
+      <a class="nav-item" data-section="groups">
         <svg viewBox="0 0 24 24">
           <path
             d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z" />
@@ -130,19 +144,19 @@
     </header>
 
       <nav class="mobile-nav-bar" aria-label="Mobile dashboard tabs">
-        <button class="mobile-nav-item active" data-section="overview" onclick="showSection('overview', this)" type="button">
+        <button class="mobile-nav-item active" data-section="overview" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
           <span>Overview</span>
         </button>
-        <button class="mobile-nav-item" data-section="approvals" onclick="showSection('approvals', this)" type="button">
+        <button class="mobile-nav-item" data-section="approvals" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2zm-2 1H8v-6c0-2.48 1.51-4.5 4-4.5s4 2.02 4 4.5v6z"/></svg>
           <span>Approvals</span>
         </button>
-        <button class="mobile-nav-item" data-section="activity" onclick="showSection('activity', this)" type="button">
+        <button class="mobile-nav-item" data-section="activity" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2.05v3.03c3.39.49 6 3.39 6 6.92 0 .9-.18 1.75-.48 2.54l2.6 1.53c.56-1.24.88-2.62.88-4.07 0-5.18-3.95-9.45-9-9.95zM12 19c-3.87 0-7-3.13-7-7 0-3.53 2.61-6.43 6-6.92V2.05c-5.06.5-9 4.76-9 9.95 0 5.52 4.47 10 9.99 10 3.31 0 6.24-1.61 8.06-4.09l-2.6-1.53C16.17 17.98 14.21 19 12 19z"/></svg>
           <span>Activity</span>
         </button>
-        <button class="mobile-nav-item" data-section="groups" onclick="showSection('groups', this)" type="button">
+        <button class="mobile-nav-item" data-section="groups" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
           <span>Groups</span>
         </button>
@@ -242,8 +256,7 @@
               </svg>
               Pending Approvals
             </div>
-            <a class="card-link"
-              onclick="showSection('approvals', document.querySelector('[data-section=approvals]'))">View all →</a>
+            <a class="card-link" data-section="approvals">View all →</a>
           </div>
           <div id="ov-approval-list" class="approval-list-mini"></div>
         </div>
@@ -258,8 +271,7 @@
               </svg>
               Live Activity
             </div>
-            <a class="card-link"
-              onclick="showSection('activity', document.querySelector('[data-section=activity]'))">View all →</a>
+            <a class="card-link" data-section="activity">View all →</a>
           </div>
           <div id="ov-activity-list" class="activity-feed"></div>
         </div>
