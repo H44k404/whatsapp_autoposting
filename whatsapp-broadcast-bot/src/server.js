@@ -89,13 +89,34 @@ async function refreshGroupCache(sock) {
     const participating = await sock.groupFetchAllParticipating();
     cachedParticipatingGroups = participating;
     groupCacheTime = Date.now();
+    for (const [jid, meta] of Object.entries(participating || {})) {
+      if (meta?.subject) groupNameCache.set(jid, meta.subject);
+    }
+    if (_io && cachedParticipatingGroups) {
+      const config = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
+      const targetSet = new Set(config.targetGroups || []);
+      const groups = Object.values(cachedParticipatingGroups).map((g) => ({
+        jid: g.id,
+        name: g.subject || g.name || g.id,
+        participantCount: (g.participants || g.participantCount || []).length,
+        isTarget: targetSet.has(g.id),
+        isMain: g.id === config.mainGroup,
+      }));
+      _io.emit("groups:refreshed", groups);
+    }
   } catch (e) {
     logger.warn({ err: e.message, stack: e.stack }, "Failed to refresh group cache");
   }
 }
+
 async function getGroupName(sock, jid) {
   if (!jid) return "";
   if (groupNameCache.has(jid)) return groupNameCache.get(jid);
+  if (cachedParticipatingGroups && cachedParticipatingGroups[jid]?.subject) {
+    const name = cachedParticipatingGroups[jid].subject;
+    groupNameCache.set(jid, name);
+    return name;
+  }
   if (!sock) return jid; // fallback if disconnected
   try {
     const meta = await sock.groupMetadata(jid);
@@ -333,7 +354,8 @@ function createServer(handleControlReplyFn, getSock) {
     const sock = getSock();
     if (!sock) return res.status(503).json({ error: "Bot not connected" });
     try {
-      await handleControlReplyFn(sock, `NO ${id}`);
+      const { resolveApproval } = require("./approval");
+      await resolveApproval(sock, id, "no");
       res.json({ ok: true });
     } catch (e) {
       res.status(500).json({ error: e.message });
@@ -357,6 +379,7 @@ function createServer(handleControlReplyFn, getSock) {
 
       res.json({
         mainGroup: { jid: groups.mainGroup, name: mainGroupName },
+        controlChatJid: groups.controlChatJid || null,
         targetGroups: resolvedTargetGroups
       });
     } catch (e) {
@@ -375,6 +398,7 @@ function createServer(handleControlReplyFn, getSock) {
       const existing = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
       existing.targetGroups = data.targetGroups;
       fs.writeFileSync(GROUPS_PATH, JSON.stringify(existing, null, 2));
+      logger.info({ mainGroup: existing.mainGroup, controlChatJid: existing.controlChatJid }, "Groups settings saved");
       
       // Resolve names for the socket emission
       const sock = getSock();
@@ -385,6 +409,37 @@ function createServer(handleControlReplyFn, getSock) {
       
       const enriched = {
         mainGroup: { jid: existing.mainGroup, name: mainGroupName },
+        targetGroups: resolvedTargetGroups
+      };
+      
+      res.json({ ok: true });
+      io.emit("groups:updated", enriched);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Save main group (source) and control chat JID
+  app.post("/api/groups/settings", async (req, res) => {
+    try {
+      const data = req.body;
+      const existing = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
+      
+      if (data.mainGroup) existing.mainGroup = data.mainGroup;
+      if (data.controlChatJid !== undefined) existing.controlChatJid = data.controlChatJid;
+      
+      fs.writeFileSync(GROUPS_PATH, JSON.stringify(existing, null, 2));
+      
+      // Resolve names and emit update
+      const sock = getSock();
+      const mainGroupName = await getGroupName(sock, existing.mainGroup);
+      const resolvedTargetGroups = await Promise.all(
+        (existing.targetGroups || []).map(async (jid) => ({ jid, name: await getGroupName(sock, jid) }))
+      );
+      
+      const enriched = {
+        mainGroup: { jid: existing.mainGroup, name: mainGroupName },
+        controlChatJid: existing.controlChatJid,
         targetGroups: resolvedTargetGroups
       };
       
@@ -407,15 +462,48 @@ function createServer(handleControlReplyFn, getSock) {
 
     async function sendGroups(groupsData) {
       const targetSet = new Set(config.targetGroups || []);
-      const groups = groupsData.map((g) => ({
-        jid: g.id,
-        name: g.subject || g.name || g.id,
-        participantCount: (g.participants || g.participantCount || []).length,
-        isTarget: targetSet.has(g.id),
-        isMain: g.id === config.mainGroup,
-      }));
+      const controlJid = config.controlChatJid;
+      const groupMap = new Map();
+
+      for (const g of groupsData) {
+        const jid = g.id;
+        const entry = {
+          jid,
+          name: g.subject || g.name || jid,
+          participantCount: (g.participants || g.participantCount || []).length,
+          isTarget: targetSet.has(jid),
+          isMain: jid === config.mainGroup,
+          isControl: jid === controlJid,
+        };
+        groupMap.set(jid, entry);
+      }
+
+      if (config.mainGroup && !groupMap.has(config.mainGroup)) {
+        groupMap.set(config.mainGroup, {
+          jid: config.mainGroup,
+          name: config.mainGroup,
+          participantCount: 0,
+          isTarget: targetSet.has(config.mainGroup),
+          isMain: true,
+          isControl: config.mainGroup === controlJid,
+        });
+      }
+
+      if (controlJid && !groupMap.has(controlJid)) {
+        groupMap.set(controlJid, {
+          jid: controlJid,
+          name: controlJid,
+          participantCount: 0,
+          isTarget: targetSet.has(controlJid),
+          isMain: controlJid === config.mainGroup,
+          isControl: true,
+        });
+      }
+
+      const groups = Array.from(groupMap.values());
       groups.sort((a, b) => {
         if (a.isMain !== b.isMain) return a.isMain ? -1 : 1;
+        if (a.isControl !== b.isControl) return a.isControl ? -1 : 1;
         if (a.isTarget !== b.isTarget) return a.isTarget ? -1 : 1;
         return (a.name || "").localeCompare(b.name || "");
       });
@@ -424,14 +512,11 @@ function createServer(handleControlReplyFn, getSock) {
 
     try {
       const now = Date.now();
-      if (sock && (!cachedParticipatingGroups || (now - groupCacheTime > 2 * 60 * 1000))) {
-        try {
-          const participating = await sock.groupFetchAllParticipating();
-          cachedParticipatingGroups = participating;
-          groupCacheTime = now;
-        } catch (innerError) {
-          logger.warn({ err: innerError.message, stack: innerError.stack }, "groupFetchAllParticipating failed in /api/groups/all");
-        }
+      const cacheExpired = !cachedParticipatingGroups || (now - groupCacheTime > 2 * 60 * 1000);
+      if (sock && cacheExpired) {
+        refreshGroupCache(sock).catch((innerError) => {
+          logger.warn({ err: innerError.message, stack: innerError.stack }, "groupFetchAllParticipating refresh failed in /api/groups/all");
+        });
       }
 
       if (cachedParticipatingGroups) {

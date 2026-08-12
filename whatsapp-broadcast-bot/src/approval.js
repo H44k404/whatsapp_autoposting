@@ -2,13 +2,21 @@ const { v4: uuidv4 } = require("uuid");
 const { downloadMediaMessage } = require("baileys");
 const { savePending, getPending, deletePending, readAll, saveMediaBuffer } = require("./store");
 const { classifyReply, describeMedia } = require("./ollama");
-const { broadcastToGroups, broadcastRawMedia } = require("./broadcaster");
+const { broadcastToGroups, broadcastRawMedia, loadGroups } = require("./broadcaster");
 const logger = require("./utils/logger");
 const bus = require("./events");
 
-const CONTROL_CHAT = process.env.CONTROL_CHAT_JID;
 // parseFloat (not parseInt) so fractional-minute timeouts work correctly too
 const TIMEOUT_MS = (parseFloat(process.env.APPROVAL_TIMEOUT_MINUTES) || 30) * 60000;
+
+function getControlChat() {
+  try {
+    const groups = loadGroups();
+    return groups.controlChatJid || process.env.CONTROL_CHAT_JID;
+  } catch (err) {
+    return process.env.CONTROL_CHAT_JID;
+  }
+}
 
 // setTimeout handles for pending expirations, keyed by request id.
 const timeoutHandles = new Map();
@@ -18,8 +26,10 @@ const timeoutHandles = new Map();
  * Also downloads a media preview for the dashboard and emits approval:new.
  */
 async function requestApproval(sock, originalMsg, mediaType, caption) {
+  const CONTROL_CHAT = getControlChat();
+  
   if (!CONTROL_CHAT) {
-    throw new Error("CONTROL_CHAT_JID is not set in .env — cannot send approval requests.");
+    throw new Error("CONTROL_CHAT_JID is not set in .env or config/groups.json — cannot send approval requests.");
   }
 
   const id = uuidv4().slice(0, 8);
@@ -91,6 +101,7 @@ async function requestApproval(sock, originalMsg, mediaType, caption) {
  * request it refers to, classifies it as yes/no, and either broadcasts or discards.
  */
 async function handleControlReply(sock, text) {
+  const CONTROL_CHAT = getControlChat();
   const cleaned = (text || "").trim();
   if (!cleaned) return;
 
@@ -130,6 +141,7 @@ async function handleControlReply(sock, text) {
 }
 
 async function resolveApproval(sock, id, decision, options = {}) {
+  const CONTROL_CHAT = getControlChat();
   const handle = timeoutHandles.get(id);
   if (handle) {
     clearTimeout(handle);

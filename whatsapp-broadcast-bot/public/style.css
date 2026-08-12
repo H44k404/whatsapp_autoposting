@@ -12,7 +12,13 @@
 }
 
 :root {
-  /* ── Surfaces ─────────────────────────────────────────────────────── */
+  /* ── Surfaces ────app.js:613  POST http://localhost:3000/api/reject/732978d5 500 (Internal Server Error)
+doReject @ app.js:613
+onclick @ (index):1
+app.js:591  POST http://localhost:3000/api/approve/3049db96 500 (Internal Server Error)
+confirmBroadcast @ app.js:591
+onclick @ (index):423
+────────────────────────────────────────────────── */
   --bg-main: #05070c;
   --bg-surface: rgba(255, 255, 255, 0.035);
   --bg-surface-solid: #0d1119;
@@ -2099,6 +2105,11 @@ body {
   color: var(--success);
 }
 
+.picker-badge--control {
+  background: rgba(245, 165, 36, 0.15);
+  color: var(--warning);
+}
+
 .picker-sub {
   font-size: 12px;
   color: var(--text-faint);
@@ -2184,6 +2195,58 @@ body {
 .picker-chat-btn:hover {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-main);
+}
+
+/* Source & Control Buttons */
+.picker-source-btn,
+.picker-control-btn {
+  background: none;
+  border: 1px solid var(--border-light);
+  padding: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.picker-source-btn svg,
+.picker-control-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
+.picker-source-btn:hover,
+.picker-control-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-main);
+  border-color: var(--border-highlight);
+}
+
+.picker-source-btn.active {
+  background: rgba(99, 102, 241, 0.2);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary-soft);
+  box-shadow: 0 0 8px rgba(99, 102, 241, 0.3);
+}
+
+.picker-source-btn.active:hover {
+  background: rgba(99, 102, 241, 0.3);
+}
+
+.picker-control-btn.active {
+  background: rgba(245, 165, 36, 0.2);
+  border-color: var(--warning);
+  color: var(--warning);
+  box-shadow: 0 0 8px rgba(245, 165, 36, 0.3);
+}
+
+.picker-control-btn.active:hover {
+  background: rgba(245, 165, 36, 0.3);
 }
 
 /* Chat Empty */

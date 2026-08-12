@@ -20,17 +20,44 @@ process.stdout.write = function (chunk, encoding, callback) {
 const { startBot } = require("./whatsapp");
 const { requestApproval, handleControlReply } = require("./approval");
 const { createServer } = require("./server");
+const { loadGroups } = require("./broadcaster");
 const logger = require("./utils/logger");
 const bus = require("./events");
 
-const MAIN_GROUP = process.env.MAIN_GROUP_JID;
-const CONTROL_CHAT = process.env.CONTROL_CHAT_JID;
+function getGroupSettings() {
+  try {
+    const groups = loadGroups();
+    return {
+      MAIN_GROUP: groups.mainGroup || process.env.MAIN_GROUP_JID,
+      CONTROL_CHAT: groups.controlChatJid || process.env.CONTROL_CHAT_JID,
+    };
+  } catch (err) {
+    return {
+      MAIN_GROUP: process.env.MAIN_GROUP_JID,
+      CONTROL_CHAT: process.env.CONTROL_CHAT_JID,
+    };
+  }
+}
 
-if (!MAIN_GROUP || !CONTROL_CHAT) {
-  logger.warn(
-    "MAIN_GROUP_JID and/or CONTROL_CHAT_JID are not set in .env. " +
-      "Run `npm run discover-groups` first to find the correct JIDs, then fill in .env and config/groups.json."
+function unwrapMessagePayload(message) {
+  return (
+    message.ephemeralMessage?.message ||
+    message.viewOnceMessage?.message ||
+    message
   );
+}
+
+function extractMediaInfo(msg) {
+  const raw = unwrapMessagePayload(msg.message);
+  const imageMsg = raw.imageMessage;
+  const videoMsg = raw.videoMessage;
+  const documentMsg = raw.documentMessage;
+  const isDocumentImage = !!(documentMsg?.mimetype?.startsWith("image/"));
+  const isDocumentVideo = !!(documentMsg?.mimetype?.startsWith("video/"));
+  const hasMedia = !!(imageMsg || videoMsg || isDocumentImage || isDocumentVideo);
+  const mediaType = imageMsg || isDocumentImage ? "image" : videoMsg || isDocumentVideo ? "video" : null;
+  const caption = imageMsg?.caption || videoMsg?.caption || documentMsg?.caption || raw.extendedTextMessage?.text || raw.conversation || "";
+  return { raw, imageMsg, videoMsg, documentMsg, hasMedia, mediaType, caption };
 }
 
 const fs = require("fs");
@@ -45,10 +72,12 @@ createServer(handleControlReply, getSock);
 function connectBot() {
   return startBot(async (sock) => {
     currentSock = sock;
+    bus.emit("bot:connected");
 
     sock.ev.on("connection.update", ({ connection }) => {
       if (connection === "close") {
         currentSock = null;
+        bus.emit("bot:disconnected");
       }
     });
 
@@ -59,18 +88,32 @@ function connectBot() {
           const from = msg.key.remoteJid;
           const isFromMe = msg.key.fromMe;
 
+          const { MAIN_GROUP, CONTROL_CHAT } = getGroupSettings();
+          const { raw, imageMsg, videoMsg, documentMsg, hasMedia, mediaType, caption } = extractMediaInfo(msg);
+          const isSourceGroup = MAIN_GROUP && from === MAIN_GROUP && !isFromMe;
+          const isControlChat = CONTROL_CHAT && (from === CONTROL_CHAT || from === `${CONTROL_CHAT.split("@")[0]}@s.whatsapp.net`);
+
+          logger.info(
+            {
+              from,
+              MAIN_GROUP,
+              CONTROL_CHAT,
+              isSourceGroup,
+              isControlChat,
+              hasMedia,
+              mediaType,
+              messageKeys: Object.keys(msg.message || {}),
+              rawKeys: Object.keys(raw || {}),
+              documentMimetype: documentMsg?.mimetype,
+            },
+            "Incoming message evaluation"
+          );
+
           // Case 1: media posted in the main (source) group
           // Skip own messages in the group (the bot shouldn't react to its own sends)
-          if (MAIN_GROUP && from === MAIN_GROUP && !isFromMe) {
-            const imageMsg = msg.message.imageMessage;
-            const videoMsg = msg.message.videoMessage;
-
-            if (imageMsg || videoMsg) {
-              const mediaType = imageMsg ? "image" : "video";
-              const caption = (imageMsg || videoMsg).caption || "";
-              const id = await requestApproval(sock, msg, mediaType, caption);
-              logger.info({ id, mediaType }, "Approval request sent to control chat");
-            }
+          if (isSourceGroup && hasMedia && mediaType) {
+            const id = await requestApproval(sock, msg, mediaType, caption);
+            logger.info({ id, mediaType }, "Approval request sent to control chat");
             continue;
           }
 
@@ -97,19 +140,16 @@ function connectBot() {
             }
           }
 
-          // Case 2: reply in the private control chat.
+          // Case 2: reply in the configured control chat (private chat or control group).
           // Only the configured control chat JID may approve/reject requests.
-          const text =
+          const replyText =
             msg.message.conversation ||
             msg.message.extendedTextMessage?.text ||
             "";
 
-          const isPrivateChat = !from.endsWith('@g.us');
-          const isControlChat = from === CONTROL_CHAT || from === `${CONTROL_CHAT.split('@')[0]}@s.whatsapp.net`;
-
-          if (isPrivateChat && !isFromMe && isControlChat && text) {
-            logger.info({ from, text }, "Control chat reply received");
-            await handleControlReply(sock, text);
+          if (!isFromMe && isControlChat && replyText) {
+            logger.info({ from, replyText }, "Control chat reply received");
+            await handleControlReply(sock, replyText);
           }
         } catch (e) {
           logger.error({ err: e.message, stack: e.stack }, "Error handling incoming message");

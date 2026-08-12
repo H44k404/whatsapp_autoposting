@@ -2,7 +2,7 @@
 const state = {
   approvals: {},   // id → { id, mediaType, caption, createdAt, hasPreview }
   stats: { sentToday: 0, pending: 0, failed: 0, targetGroupCount: 0 },
-  groups: { mainGroup: "", targetGroups: [] },
+  groups: { mainGroup: "", controlChatJid: null, targetGroups: [] },
   timers: {},      // id → setInterval handle for countdown
   allGroups: [],   // full list from /api/groups/all
   chat: { openJid: null, openName: "", participantCount: 0 },
@@ -67,7 +67,15 @@ socket.on("broadcast:sent", (d) => { state.stats.sentToday++; updateStatsUI(); a
 socket.on("broadcast:failed", (d) => { state.stats.failed++; updateStatsUI(); addActivity("broadcast:failed", d); });
 socket.on("broadcast:complete", (d) => { addActivity("broadcast:complete", d); showToast("✅ Broadcast Complete", `Sent: ${d.sent} | Failed: ${d.failed}`, d.failed > 0 ? "warn" : "success"); });
 socket.on("stats:update", (s) => updateStats(s));
-socket.on("groups:updated", (g) => { state.groups = g; });
+socket.on("groups:updated", (g) => { 
+  state.groups = g;
+  renderGroupPicker(state.allGroups); // Re-render picker to show updated badges
+});
+
+socket.on("groups:refreshed", (groups) => {
+  state.allGroups = groups;
+  renderGroupPicker(state.allGroups);
+});
 
 // Auto-reload when server signals a public/ file change (dev hot-reload)
 socket.on("reload", () => { window.location.reload(); });
@@ -102,6 +110,7 @@ async function loadInitialData() {
       fetch("/api/status").then(r => r.json()),
       fetch("/api/groups").then(r => r.json()),
     ]);
+    console.log("DEBUG: loadInitialData groupsRes:", groupsRes);
     updateStats({
       sentToday: statusRes.sentToday || 0,
       pending: statusRes.pending || 0,
@@ -502,8 +511,13 @@ function loadBroadcastPrefs() {
   return null;
 }
 
-function doApprove(id) {
+async function doApprove(id) {
   currentApprovalId = id;
+
+  if (!state.allGroups || !state.allGroups.length) {
+    await loadAllGroups();
+  }
+
   const card = document.getElementById(`card-${id}`);
   if (card) { card.style.opacity = "0.5"; card.style.pointerEvents = "none"; }
 
@@ -717,12 +731,18 @@ async function loadAllGroups() {
 function renderGroupPicker(groups) {
   const list = document.getElementById("all-groups-list");
   if (!list) return;
-  if (!groups || !groups.length) {
+  if (!state.allGroups || !state.allGroups.length) {
     list.innerHTML = `<div class="empty-state"><div class="empty-sub">No groups found</div></div>`;
     return;
   }
+  const sortedGroups = [...state.allGroups].sort((a, b) => {
+    if ((a.isMain ? 1 : 0) !== (b.isMain ? 1 : 0)) return b.isMain ? 1 : -1;
+    if ((a.isControl ? 1 : 0) !== (b.isControl ? 1 : 0)) return b.isControl ? 1 : -1;
+    if ((a.isTarget ? 1 : 0) !== (b.isTarget ? 1 : 0)) return b.isTarget ? 1 : -1;
+    return (a.name || "").localeCompare(b.name || "");
+  });
   list.innerHTML = "";
-  for (const g of state.allGroups) {
+  for (const g of sortedGroups) {
     list.appendChild(buildPickerRow(g));
   }
 
@@ -739,7 +759,8 @@ function buildPickerRow(g) {
   const initials = (g.name || "G").slice(0, 2).toUpperCase();
   const hue = [...g.jid].reduce((a, c) => a + c.charCodeAt(0), 0) % 360;
   const badges = (g.isMain ? `<span class="picker-badge picker-badge--main">Source</span>` : "")
-    + (g.isTarget ? `<span class="picker-badge picker-badge--target">Broadcast</span>` : "");
+    + (g.isTarget ? `<span class="picker-badge picker-badge--target">Broadcast</span>` : "")
+    + ((g.isControl || state.groups.controlChatJid === g.jid) ? `<span class="picker-badge picker-badge--control">Control</span>` : "");
   const safeJid = g.jid.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 
   // Create an escaped version of the JSON string for the HTML attribute
@@ -753,6 +774,12 @@ function buildPickerRow(g) {
       <div class="picker-sub">${g.participantCount} member${g.participantCount !== 1 ? "s" : ""}</div>
     </div>
     <div class="picker-actions">
+      <button class="picker-source-btn ${g.isMain ? 'active' : ''}" onclick="setMainGroup('${safeJid}')" title="Set as source group">
+        <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+      </button>
+      <button class="picker-control-btn ${state.groups.controlChatJid === g.jid ? 'active' : ''}" onclick="setControlChat('${safeJid}')" title="Set as control chat">
+        <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>
+      </button>
       <label class="picker-toggle" title="Add as broadcast target">
         <input type="checkbox" ${g.isTarget ? "checked" : ""} ${g.isMain ? "disabled" : ""}
           onchange="updatePickerTarget('${safeJid}', this.checked)" />
@@ -783,6 +810,50 @@ function updateGroupLiveIndicator(jid, text) {
 function updatePickerTarget(jid, checked) {
   const g = state.allGroups.find(x => x.jid === jid);
   if (g) g.isTarget = checked;
+}
+
+async function setMainGroup(jid) {
+  try {
+    const r = await fetch("/api/groups/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mainGroup: jid }),
+    });
+    if (!r.ok) throw new Error((await r.json()).error);
+    const name = await getGroupName(jid);
+    state.groups.mainGroup = { jid, name };
+    state.allGroups = (state.allGroups || []).map((g) => ({
+      ...g,
+      isMain: g.jid === jid,
+    }));
+    showToast("✅ Source Updated", `Source group changed to new selection`, "success");
+    setTimeout(async () => {
+      await loadAllGroups();
+      renderGroupPicker(state.allGroups);
+    }, 600);
+  } catch (e) {
+    showToast("❌ Error", e.message, "error");
+  }
+}
+
+async function setControlChat(jid) {
+  try {
+    const r = await fetch("/api/groups/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ controlChatJid: jid }),
+    });
+    if (!r.ok) throw new Error((await r.json()).error);
+    state.groups.controlChatJid = jid;
+    state.allGroups = (state.allGroups || []).map((g) => ({
+      ...g,
+      isControl: g.jid === jid,
+    }));
+    renderGroupPicker(state.allGroups); // Re-render to update badges
+    showToast("✅ Control Chat Updated", `Control chat changed to new selection`, "success");
+  } catch (e) {
+    showToast("❌ Error", e.message, "error");
+  }
 }
 
 function filterGroupsList(query) {
