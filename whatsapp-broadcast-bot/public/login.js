@@ -1,3 +1,15 @@
+function showError(message) {
+  const errEl = document.getElementById('error-msg');
+  const errText = document.getElementById('error-text');
+  if (errText) errText.textContent = message;
+  if (errEl) errEl.classList.add('show');
+}
+
+function hideError() {
+  const errEl = document.getElementById('error-msg');
+  if (errEl) errEl.classList.remove('show');
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   const params = new URLSearchParams(window.location.search);
   if (params.get('error') === '1') {
@@ -23,7 +35,7 @@ document.addEventListener('DOMContentLoaded', () => {
     e.preventDefault();
     const btn = document.getElementById('login-btn');
     const errEl = document.getElementById('error-msg');
-    if (errEl) errEl.classList.remove('show');
+    hideError();
     if (btn) {
       btn.classList.add('loading');
       btn.disabled = true;
@@ -42,14 +54,10 @@ document.addEventListener('DOMContentLoaded', () => {
       if (res.ok && data.ok) {
         window.location.href = '/';
       } else {
-        const errText = document.getElementById('error-text');
-        if (errText) errText.textContent = data.error || 'Invalid credentials.';
-        if (errEl) errEl.classList.add('show');
+        showError(data.error || 'Invalid credentials.');
       }
     } catch (err) {
-      const errText = document.getElementById('error-text');
-      if (errText) errText.textContent = 'Network error. Please try again.';
-      if (errEl) errEl.classList.add('show');
+      showError('Network error. Please try again.');
     } finally {
       if (btn) {
         btn.classList.remove('loading');

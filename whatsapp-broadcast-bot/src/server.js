@@ -13,7 +13,6 @@ const compression = require("compression");
 const path = require("path");
 const fs = require("fs");
 const bus = require("./events");
-const logger = require("./utils/logger");
 const { readAll, getMediaBuffer } = require("./store");
 const { messageStore } = require("./whatsapp");
 const { downloadMediaMessage } = require("baileys");
@@ -89,34 +88,13 @@ async function refreshGroupCache(sock) {
     const participating = await sock.groupFetchAllParticipating();
     cachedParticipatingGroups = participating;
     groupCacheTime = Date.now();
-    for (const [jid, meta] of Object.entries(participating || {})) {
-      if (meta?.subject) groupNameCache.set(jid, meta.subject);
-    }
-    if (_io && cachedParticipatingGroups) {
-      const config = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
-      const targetSet = new Set(config.targetGroups || []);
-      const groups = Object.values(cachedParticipatingGroups).map((g) => ({
-        jid: g.id,
-        name: g.subject || g.name || g.id,
-        participantCount: (g.participants || g.participantCount || []).length,
-        isTarget: targetSet.has(g.id),
-        isMain: g.id === config.mainGroup,
-      }));
-      _io.emit("groups:refreshed", groups);
-    }
   } catch (e) {
-    logger.warn({ err: e.message, stack: e.stack }, "Failed to refresh group cache");
+    // ignore
   }
 }
-
 async function getGroupName(sock, jid) {
   if (!jid) return "";
   if (groupNameCache.has(jid)) return groupNameCache.get(jid);
-  if (cachedParticipatingGroups && cachedParticipatingGroups[jid]?.subject) {
-    const name = cachedParticipatingGroups[jid].subject;
-    groupNameCache.set(jid, name);
-    return name;
-  }
   if (!sock) return jid; // fallback if disconnected
   try {
     const meta = await sock.groupMetadata(jid);
@@ -210,7 +188,7 @@ function createServer(handleControlReplyFn, getSock) {
   }
 
   // ── Auth routes (public — no auth required) ───────────────────────────────
-  app.post("/auth/login", (req, res) => {
+  app.post("/auth/login", async (req, res) => {
     const username = (req.body?.username || "").trim();
     const password = (req.body?.password || "").trim();
     const clientIp = getClientIp(req);
@@ -354,8 +332,7 @@ function createServer(handleControlReplyFn, getSock) {
     const sock = getSock();
     if (!sock) return res.status(503).json({ error: "Bot not connected" });
     try {
-      const { resolveApproval } = require("./approval");
-      await resolveApproval(sock, id, "no");
+      await handleControlReplyFn(sock, `NO ${id}`);
       res.json({ ok: true });
     } catch (e) {
       res.status(500).json({ error: e.message });
@@ -379,7 +356,6 @@ function createServer(handleControlReplyFn, getSock) {
 
       res.json({
         mainGroup: { jid: groups.mainGroup, name: mainGroupName },
-        controlChatJid: groups.controlChatJid || null,
         targetGroups: resolvedTargetGroups
       });
     } catch (e) {
@@ -398,7 +374,6 @@ function createServer(handleControlReplyFn, getSock) {
       const existing = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
       existing.targetGroups = data.targetGroups;
       fs.writeFileSync(GROUPS_PATH, JSON.stringify(existing, null, 2));
-      logger.info({ mainGroup: existing.mainGroup, controlChatJid: existing.controlChatJid }, "Groups settings saved");
       
       // Resolve names for the socket emission
       const sock = getSock();
@@ -419,37 +394,6 @@ function createServer(handleControlReplyFn, getSock) {
     }
   });
 
-  // Save main group (source) and control chat JID
-  app.post("/api/groups/settings", async (req, res) => {
-    try {
-      const data = req.body;
-      const existing = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
-      
-      if (data.mainGroup) existing.mainGroup = data.mainGroup;
-      if (data.controlChatJid !== undefined) existing.controlChatJid = data.controlChatJid;
-      
-      fs.writeFileSync(GROUPS_PATH, JSON.stringify(existing, null, 2));
-      
-      // Resolve names and emit update
-      const sock = getSock();
-      const mainGroupName = await getGroupName(sock, existing.mainGroup);
-      const resolvedTargetGroups = await Promise.all(
-        (existing.targetGroups || []).map(async (jid) => ({ jid, name: await getGroupName(sock, jid) }))
-      );
-      
-      const enriched = {
-        mainGroup: { jid: existing.mainGroup, name: mainGroupName },
-        controlChatJid: existing.controlChatJid,
-        targetGroups: resolvedTargetGroups
-      };
-      
-      res.json({ ok: true });
-      io.emit("groups:updated", enriched);
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
   // Activity log
   app.get("/api/logs", (req, res) => {
     res.json(activityLog.slice(0, 100));
@@ -458,85 +402,48 @@ function createServer(handleControlReplyFn, getSock) {
   // All groups the bot is participating in (for the groups picker)
   app.get("/api/groups/all", async (req, res) => {
     const sock = getSock();
-    const config = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
-
-    async function sendGroups(groupsData) {
+    if (!sock) return res.status(503).json({ error: "Bot not connected" });
+    try {
+      const now = Date.now();
+      // If cache is empty or older than 2 minutes, fetch fresh
+      if (!cachedParticipatingGroups || (now - groupCacheTime > 2 * 60 * 1000)) {
+        const participating = await sock.groupFetchAllParticipating();
+        cachedParticipatingGroups = participating;
+        groupCacheTime = now;
+      }
+      
+      const config = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
       const targetSet = new Set(config.targetGroups || []);
-      const controlJid = config.controlChatJid;
-      const groupMap = new Map();
-
-      for (const g of groupsData) {
-        const jid = g.id;
-        const entry = {
-          jid,
-          name: g.subject || g.name || jid,
-          participantCount: (g.participants || g.participantCount || []).length,
-          isTarget: targetSet.has(jid),
-          isMain: jid === config.mainGroup,
-          isControl: jid === controlJid,
-        };
-        groupMap.set(jid, entry);
-      }
-
-      if (config.mainGroup && !groupMap.has(config.mainGroup)) {
-        groupMap.set(config.mainGroup, {
-          jid: config.mainGroup,
-          name: config.mainGroup,
-          participantCount: 0,
-          isTarget: targetSet.has(config.mainGroup),
-          isMain: true,
-          isControl: config.mainGroup === controlJid,
-        });
-      }
-
-      if (controlJid && !groupMap.has(controlJid)) {
-        groupMap.set(controlJid, {
-          jid: controlJid,
-          name: controlJid,
-          participantCount: 0,
-          isTarget: targetSet.has(controlJid),
-          isMain: controlJid === config.mainGroup,
-          isControl: true,
-        });
-      }
-
-      const groups = Array.from(groupMap.values());
+      const groups = Object.values(cachedParticipatingGroups).map((g) => ({
+        jid: g.id,
+        name: g.subject || g.id,
+        participantCount: (g.participants || []).length,
+        isTarget: targetSet.has(g.id),
+        isMain: g.id === config.mainGroup,
+      }));
       groups.sort((a, b) => {
         if (a.isMain !== b.isMain) return a.isMain ? -1 : 1;
-        if (a.isControl !== b.isControl) return a.isControl ? -1 : 1;
         if (a.isTarget !== b.isTarget) return a.isTarget ? -1 : 1;
         return (a.name || "").localeCompare(b.name || "");
       });
       res.json(groups);
-    }
-
-    try {
-      const now = Date.now();
-      const cacheExpired = !cachedParticipatingGroups || (now - groupCacheTime > 2 * 60 * 1000);
-      if (sock && cacheExpired) {
-        refreshGroupCache(sock).catch((innerError) => {
-          logger.warn({ err: innerError.message, stack: innerError.stack }, "groupFetchAllParticipating refresh failed in /api/groups/all");
-        });
-      }
-
-      if (cachedParticipatingGroups) {
-        return sendGroups(Object.values(cachedParticipatingGroups));
-      }
-
-      // No active bot and no cache available — return the configured groups as a safe fallback.
-      const fallbackGroups = [];
-      if (config.mainGroup) {
-        fallbackGroups.push({ id: config.mainGroup, name: config.mainGroup, participantCount: 0 });
-      }
-      for (const jid of config.targetGroups || []) {
-        if (jid !== config.mainGroup) {
-          fallbackGroups.push({ id: jid, name: jid, participantCount: 0 });
-        }
-      }
-      return sendGroups(fallbackGroups);
     } catch (e) {
       if (cachedParticipatingGroups) {
-        return sendGroups(Object.values(cachedParticipatingGroups));
+        const config = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
+        const targetSet = new Set(config.targetGroups || []);
+        const groups = Object.values(cachedParticipatingGroups).map((g) => ({
+          jid: g.id,
+          name: g.subject || g.id,
+          participantCount: (g.participants || []).length,
+          isTarget: targetSet.has(g.id),
+          isMain: g.id === config.mainGroup,
+        }));
+        groups.sort((a, b) => {
+          if (a.isMain !== b.isMain) return a.isMain ? -1 : 1;
+          if (a.isTarget !== b.isTarget) return a.isTarget ? -1 : 1;
+          return (a.name || "").localeCompare(b.name || "");
+        });
+        return res.json(groups);
       }
       res.status(500).json({ error: e.message });
     }
