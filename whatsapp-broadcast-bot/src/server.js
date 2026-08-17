@@ -394,6 +394,45 @@ function createServer(handleControlReplyFn, getSock) {
     }
   });
 
+  // Update group settings (mainGroup or controlChatJid)
+  app.post("/api/groups/settings", async (req, res) => {
+    try {
+      const { mainGroup, controlChatJid } = req.body;
+      
+      if (!mainGroup && !controlChatJid) {
+        return res.status(400).json({ error: "Must provide mainGroup or controlChatJid" });
+      }
+
+      // Read existing config
+      const existing = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
+      
+      // Update fields if provided
+      if (mainGroup) existing.mainGroup = mainGroup;
+      if (controlChatJid) existing.controlChatJid = controlChatJid;
+      
+      // Write updated config
+      fs.writeFileSync(GROUPS_PATH, JSON.stringify(existing, null, 2));
+      
+      // Emit update to connected clients
+      const sock = getSock();
+      if (sock) {
+        const mainGroupName = await getGroupName(sock, existing.mainGroup);
+        const resolvedTargetGroups = await Promise.all(
+          (existing.targetGroups || []).map(async (jid) => ({ jid, name: await getGroupName(sock, jid) }))
+        );
+        io.emit("groups:updated", {
+          mainGroup: { jid: existing.mainGroup, name: mainGroupName },
+          controlChatJid: existing.controlChatJid,
+          targetGroups: resolvedTargetGroups
+        });
+      }
+      
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // Activity log
   app.get("/api/logs", (req, res) => {
     res.json(activityLog.slice(0, 100));
