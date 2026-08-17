@@ -17,10 +17,10 @@ process.stdout.write = function (chunk, encoding, callback) {
 };
 // ─────────────────────────────────────────────────────────────────────────
 
-const { startBot } = require("./whatsapp");
+const { startBot, cleanupSocket } = require("./whatsapp");
 const { requestApproval, handleControlReply } = require("./approval");
 const { createServer } = require("./server");
-const { loadGroups } = require("./broadcaster");
+const { loadGroups, getGroupName } = require("./broadcaster");
 const logger = require("./utils/logger");
 const bus = require("./events");
 
@@ -64,100 +64,113 @@ const fs = require("fs");
 
 // Hold a reference to the active socket so the dashboard API can use it.
 let currentSock = null;
+let messageHandlerAttached = false;
 const getSock = () => currentSock;
 
 // Start the web dashboard server before the bot connects.
 createServer(handleControlReply, getSock);
 
 function connectBot() {
+  messageHandlerAttached = false; // Reset flag on new connection attempt
+  
   return startBot(async (sock) => {
     currentSock = sock;
     bus.emit("bot:connected");
 
-    sock.ev.on("connection.update", ({ connection }) => {
-      if (connection === "close") {
-        currentSock = null;
-        bus.emit("bot:disconnected");
-      }
-    });
+    // Only attach message handler once per socket to prevent duplicate listeners
+    if (!messageHandlerAttached) {
+      messageHandlerAttached = true;
+      
+      sock.ev.on("messages.upsert", async ({ messages }) => {
+        for (const msg of messages) {
+          try {
+            if (!msg.message) continue;
+            const from = msg.key.remoteJid;
+            const isFromMe = msg.key.fromMe;
 
-    sock.ev.on("messages.upsert", async ({ messages }) => {
-      for (const msg of messages) {
-        try {
-          if (!msg.message) continue;
-          const from = msg.key.remoteJid;
-          const isFromMe = msg.key.fromMe;
+            const { MAIN_GROUP, CONTROL_CHAT } = getGroupSettings();
+            const { raw, imageMsg, videoMsg, documentMsg, hasMedia, mediaType, caption } = extractMediaInfo(msg);
+            const isSourceGroup = MAIN_GROUP && from === MAIN_GROUP && !isFromMe;
+            const isControlChat = CONTROL_CHAT && (from === CONTROL_CHAT || from === `${CONTROL_CHAT.split("@")[0]}@s.whatsapp.net`);
 
-          const { MAIN_GROUP, CONTROL_CHAT } = getGroupSettings();
-          const { raw, imageMsg, videoMsg, documentMsg, hasMedia, mediaType, caption } = extractMediaInfo(msg);
-          const isSourceGroup = MAIN_GROUP && from === MAIN_GROUP && !isFromMe;
-          const isControlChat = CONTROL_CHAT && (from === CONTROL_CHAT || from === `${CONTROL_CHAT.split("@")[0]}@s.whatsapp.net`);
+            // Get group name for logging
+            const groupName = await getGroupName(sock, from);
 
-          logger.info(
-            {
-              from,
-              MAIN_GROUP,
-              CONTROL_CHAT,
-              isSourceGroup,
-              isControlChat,
-              hasMedia,
-              mediaType,
-              messageKeys: Object.keys(msg.message || {}),
-              rawKeys: Object.keys(raw || {}),
-              documentMimetype: documentMsg?.mimetype,
-            },
-            "Incoming message evaluation"
-          );
+            logger.info(
+              {
+                from,
+                groupName,
+                MAIN_GROUP,
+                CONTROL_CHAT,
+                isSourceGroup,
+                isControlChat,
+                hasMedia,
+                mediaType,
+                messageKeys: Object.keys(msg.message || {}),
+                rawKeys: Object.keys(raw || {}),
+                documentMimetype: documentMsg?.mimetype,
+              },
+              "Incoming message evaluation"
+            );
 
-          // Case 1: media posted in the main (source) group
-          // Skip own messages in the group (the bot shouldn't react to its own sends)
-          if (isSourceGroup && hasMedia && mediaType) {
-            const id = await requestApproval(sock, msg, mediaType, caption);
-            logger.info({ id, mediaType }, "Approval request sent to control chat");
-            continue;
-          }
+            // Case 1: media posted in the main (source) group
+            // Skip own messages in the group (the bot shouldn't react to its own sends)
+            if (isSourceGroup && hasMedia && mediaType) {
+              try {
+                const id = await requestApproval(sock, msg, mediaType, caption);
+                logger.info({ id, mediaType, groupName, captionLength: caption?.length }, "✅ Approval request created and sent to control chat");
+                bus.emit("approval:request", { id, mediaType, groupName, from });
+              } catch (e) {
+                logger.error({ err: e.message, mediaType, groupName }, "❌ Failed to create approval request");
+              }
+              continue;
+            }
 
-          // Forward all group messages to the dashboard chat panel in real-time
-          if (from.endsWith("@g.us") && !isFromMe) {
-            const text =
+            // Forward all group messages to the dashboard chat panel in real-time
+            if (from.endsWith("@g.us") && !isFromMe) {
+              const text =
+                msg.message.conversation ||
+                msg.message.extendedTextMessage?.text ||
+                msg.message.imageMessage?.caption ||
+                msg.message.videoMessage?.caption ||
+                (msg.message.imageMessage ? "[Image]" : null) ||
+                (msg.message.videoMessage ? "[Video]" : null) ||
+                (msg.message.stickerMessage ? "[Sticker]" : null) ||
+                (msg.message.audioMessage ? "[Audio]" : null);
+              if (text) {
+                bus.emit("chat:message", {
+                  jid: from,
+                  groupName,
+                  id: msg.key.id,
+                  fromMe: false,
+                  sender: msg.key.participant || from,
+                  text,
+                  ts: Date.now(),
+                });
+              }
+            }
+
+            // Case 2: reply in the configured control chat (private chat or control group).
+            // Only the configured control chat JID may approve/reject requests.
+            const replyText =
               msg.message.conversation ||
               msg.message.extendedTextMessage?.text ||
-              msg.message.imageMessage?.caption ||
-              msg.message.videoMessage?.caption ||
-              (msg.message.imageMessage ? "[Image]" : null) ||
-              (msg.message.videoMessage ? "[Video]" : null) ||
-              (msg.message.stickerMessage ? "[Sticker]" : null) ||
-              (msg.message.audioMessage ? "[Audio]" : null);
-            if (text) {
-              bus.emit("chat:message", {
-                jid: from,
-                id: msg.key.id,
-                fromMe: false,
-                sender: msg.key.participant || from,
-                text,
-                ts: Date.now(),
-              });
+              "";
+
+            if (!isFromMe && isControlChat && replyText) {
+              logger.info({ from, groupName, replyText }, "Control chat reply received");
+              await handleControlReply(sock, replyText);
             }
+          } catch (e) {
+            logger.error({ err: e.message, stack: e.stack }, "Error handling incoming message");
           }
-
-          // Case 2: reply in the configured control chat (private chat or control group).
-          // Only the configured control chat JID may approve/reject requests.
-          const replyText =
-            msg.message.conversation ||
-            msg.message.extendedTextMessage?.text ||
-            "";
-
-          if (!isFromMe && isControlChat && replyText) {
-            logger.info({ from, replyText }, "Control chat reply received");
-            await handleControlReply(sock, replyText);
-          }
-        } catch (e) {
-          logger.error({ err: e.message, stack: e.stack }, "Error handling incoming message");
         }
-      }
-    });
+      });
+    }
   }).catch((err) => {
     logger.error({ err: err.message, stack: err.stack }, "Failed to start WhatsApp bot");
+    currentSock = null;
+    messageHandlerAttached = false;
     bus.emit("bot:disconnected");
   });
 }
@@ -168,17 +181,20 @@ connectBot();
 // Listen to reset requests from server
 bus.on("bot:reset_session", async () => {
   logger.info("Reset session triggered. Logging out...");
+  messageHandlerAttached = false; // Reset listener flag
+  
   if (currentSock) {
     const origLog = console.log;
     console.log = () => {};  // silence Signal Protocol session dumps during logout
     try {
       await currentSock.logout();
     } catch (e) {
-      try { currentSock.end(); } catch (_) {}
+      logger.debug({ err: e.message }, "Logout error (expected)");
     } finally {
       console.log = origLog;
+      await cleanupSocket(currentSock);
+      currentSock = null;
     }
-    currentSock = null;
   }
   
   // Wait a second for close event to propagate

@@ -122,25 +122,26 @@ async function requestApproval(sock, originalMsg, mediaType, caption) {
   let previewBase64 = null;
 
   // Try to download full media first
+  logger.info({ id, mediaType, attempt: 1 }, "Starting media download with retry logic...");
   mediaBuffer = await downloadMediaWithRetry(originalMsg, sock, 3);
   
   if (mediaBuffer) {
     // Full media download succeeded
     saveMediaBuffer(id, mediaBuffer, mediaType);
     previewBase64 = mediaBuffer.toString("base64");
-    logger.info({ id, mediaType, size: mediaBuffer.length }, "Media saved successfully");
+    logger.info({ id, mediaType, size: mediaBuffer.length }, "✅ Media saved successfully (full download)");
   } else {
     // Full media download failed, try to extract thumbnail
-    logger.warn({ id }, "Could not download full media, attempting to extract thumbnail");
+    logger.warn({ id }, "⚠️  Could not download full media, attempting to extract thumbnail from message...");
     thumbnailBuffer = extractThumbnailFromMessage(originalMsg);
     
     if (thumbnailBuffer && thumbnailBuffer.length > 0) {
       // Save thumbnail as preview
       saveMediaBuffer(id, thumbnailBuffer, "image"); // Store as image since it's JPEG
       previewBase64 = thumbnailBuffer.toString("base64");
-      logger.info({ id, size: thumbnailBuffer.length }, "Thumbnail extracted and saved as fallback");
+      logger.info({ id, size: thumbnailBuffer.length }, "✅ Thumbnail extracted and saved as fallback preview");
     } else {
-      logger.error({ id }, "Could not download media or extract thumbnail — dashboard preview unavailable");
+      logger.error({ id }, "❌ Could not download media or extract thumbnail — dashboard preview will be unavailable");
     }
   }
 
@@ -154,6 +155,7 @@ async function requestApproval(sock, originalMsg, mediaType, caption) {
   });
 
   // Emit to dashboard with group name
+  logger.info({ id, hasPreview: !!previewBase64 }, "✅ Emitting approval:new event to dashboard");
   bus.emit("approval:new", { id, mediaType, caption: description, previewBase64, createdAt: Date.now(), sourceGroupName });
 
   // Auto-expire after APPROVAL_TIMEOUT_MINUTES if nobody responds.
