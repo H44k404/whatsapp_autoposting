@@ -3,6 +3,7 @@ const path = require("path");
 const { downloadMediaMessage } = require("baileys");
 const logger = require("./utils/logger");
 const bus = require("./events");
+const { getGroupName } = require("./utils/groupCache");
 
 const GROUPS_PATH = path.join(__dirname, "..", "config", "groups.json");
 
@@ -67,9 +68,12 @@ async function broadcastToGroups(sock, originalMsg, options = {}) {
   logger.info("Media downloaded successfully, starting broadcast loop...");
   bus.emit("broadcast:start", { count: targetGroups.filter(Boolean).length });
 
-    for (const jid of targetGroups) {
+  for (const jid of targetGroups) {
     if (!jid) continue;
     try {
+      // Get group name for logging
+      const groupName = await getGroupName(sock, jid);
+      
       // Build send params and prefer using original message metadata when available
       const sendParams = { caption };
       if (mediaType === "image") {
@@ -77,20 +81,20 @@ async function broadcastToGroups(sock, originalMsg, options = {}) {
       } else {
         sendParams.video = buffer;
         const vmsg = originalMsg?.message?.videoMessage || {};
-        sendParams.fileName = vmsg.fileName || "video.mp4";
-        if (vmsg.jpegThumbnail) sendParams.jpegThumbnail = vmsg.jpegThumbnail;
+        if (vmsg.fileName) sendParams.fileName = vmsg.fileName;
         // Provide a sensible default mimetype so Baileys treats this as a video upload
         sendParams.mimetype = vmsg.mimetype || "video/mp4";
       }
 
       await sock.sendMessage(jid, sendParams);
-      logger.info(`✅ Sent to ${jid}`);
+      logger.info(`✅ Sent to ${groupName} (${jid})`);
       sent.push(jid);
-      bus.emit("broadcast:sent", { jid });
+      bus.emit("broadcast:sent", { jid, groupName });
     } catch (e) {
-      logger.error({ err: e.message, jid }, `❌ Failed to send to ${jid}`);
+      const groupName = await getGroupName(sock, jid);
+      logger.error({ err: e.message, jid }, `❌ Failed to send to ${groupName} (${jid})`);
       failed.push({ jid, error: e.message });
-      bus.emit("broadcast:failed", { jid, error: e.message });
+      bus.emit("broadcast:failed", { jid, groupName, error: e.message });
     }
     await delay(delayMs);
   }
@@ -117,6 +121,9 @@ async function broadcastRawMedia(sock, buffer, mediaType, caption, options = {})
   for (const jid of targetGroups) {
     if (!jid) continue;
     try {
+      // Get group name for logging
+      const groupName = await getGroupName(sock, jid);
+      
       const sendParams = { caption };
       if (mediaType === "image") {
         sendParams.image = buffer;
@@ -128,13 +135,14 @@ async function broadcastRawMedia(sock, buffer, mediaType, caption, options = {})
       }
 
       await sock.sendMessage(jid, sendParams);
-      logger.info(`✅ Sent to ${jid}`);
+      logger.info(`✅ Sent to ${groupName} (${jid})`);
       sent.push(jid);
-      bus.emit("broadcast:sent", { jid });
+      bus.emit("broadcast:sent", { jid, groupName });
     } catch (e) {
-      logger.error({ err: e.message, jid }, `❌ Failed to send to ${jid}`);
+      const groupName = await getGroupName(sock, jid);
+      logger.error({ err: e.message, jid }, `❌ Failed to send to ${groupName} (${jid})`);
       failed.push({ jid, error: e.message });
-      bus.emit("broadcast:failed", { jid, error: e.message });
+      bus.emit("broadcast:failed", { jid, groupName, error: e.message });
     }
     await delay(delayMs);
   }
@@ -144,4 +152,4 @@ async function broadcastRawMedia(sock, buffer, mediaType, caption, options = {})
   return { sent, failed };
 }
 
-module.exports = { broadcastToGroups, broadcastRawMedia, loadGroups };
+module.exports = { broadcastToGroups, broadcastRawMedia, loadGroups, getGroupName };
