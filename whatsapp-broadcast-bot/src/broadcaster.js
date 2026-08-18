@@ -7,9 +7,25 @@ const { getGroupName } = require("./utils/groupCache");
 const { compressVideo, resolveVideoThumbnail } = require("./utils/videoCompressor");
 
 const GROUPS_PATH = path.join(__dirname, "..", "config", "groups.json");
+const MIN_COMPRESSION_SIZE_BYTES = Number(process.env.VIDEO_MIN_COMPRESS_BYTES || 8 * 1024 * 1024);
 
 function loadGroups() {
   return JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
+}
+
+function shouldCompressVideoForBroadcast(mediaType, buffer, options = {}) {
+  if (mediaType !== "video") return false;
+
+  if (Object.prototype.hasOwnProperty.call(options, "compressVideo")) {
+    return Boolean(options.compressVideo);
+  }
+
+  const autoCompressEnabled = process.env.ENABLE_VIDEO_COMPRESSION !== "false";
+  if (!autoCompressEnabled) return false;
+
+  if (!buffer || buffer.length <= 0) return false;
+
+  return buffer.length > MIN_COMPRESSION_SIZE_BYTES;
 }
 
 function delay(ms) {
@@ -70,10 +86,12 @@ async function broadcastToGroups(sock, originalMsg, options = {}) {
   
   let videoThumbnail = null;
 
-  // Compress video if enabled and media type is video (preserves audio)
-  if (mediaType === "video") {
+  if (shouldCompressVideoForBroadcast(mediaType, buffer, options)) {
+    logger.info({ inputSizeBytes: buffer.length, minCompressBytes: MIN_COMPRESSION_SIZE_BYTES }, "Compressing video before broadcast");
     buffer = await compressVideo(buffer, "mp4");
     videoThumbnail = await resolveVideoThumbnail(originalMsg, buffer);
+  } else if (mediaType === "video") {
+    logger.info({ inputSizeBytes: buffer.length }, "Skipping video compression for this send");
   }
   
   bus.emit("broadcast:start", { count: targetGroups.filter(Boolean).length });
@@ -131,10 +149,12 @@ async function broadcastRawMedia(sock, buffer, mediaType, caption, options = {})
   
   let videoThumbnail = null;
 
-  // Compress video if enabled and media type is video (preserves audio)
-  if (mediaType === "video") {
+  if (shouldCompressVideoForBroadcast(mediaType, buffer, options)) {
+    logger.info({ inputSizeBytes: buffer.length, minCompressBytes: MIN_COMPRESSION_SIZE_BYTES }, "Compressing video before raw broadcast");
     buffer = await compressVideo(buffer, "mp4");
     videoThumbnail = await resolveVideoThumbnail(null, buffer);
+  } else if (mediaType === "video") {
+    logger.info({ inputSizeBytes: buffer.length }, "Skipping video compression for this raw send");
   }
   
   bus.emit("broadcast:start", { count: targetGroups.filter(Boolean).length });

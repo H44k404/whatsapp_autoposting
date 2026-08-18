@@ -498,9 +498,30 @@ const BROADCAST_PREFS_KEY = "broadcast_prefs_v1";
 function saveBroadcastPrefs() {
   const selectedJids = Array.from(document.querySelectorAll(".broadcast-group-cb:checked")).map(cb => cb.value);
   const delayVal = document.getElementById("broadcast-delay-input")?.value || "5";
+  const compressButton = document.getElementById("broadcast-compress-toggle");
+  const compressVideo = compressButton ? compressButton.dataset.compress === "true" : false;
   try {
-    localStorage.setItem(BROADCAST_PREFS_KEY, JSON.stringify({ selectedJids, delay: delayVal }));
+    localStorage.setItem(BROADCAST_PREFS_KEY, JSON.stringify({ selectedJids, delay: delayVal, compressVideo }));
   } catch (e) { }
+}
+
+function updateCompressToggleButton() {
+  const btn = document.getElementById("broadcast-compress-toggle");
+  if (!btn) return;
+  const enabled = btn.dataset.compress === "true";
+  btn.textContent = enabled ? "Compression: ON" : "Compression: OFF";
+  btn.setAttribute("aria-pressed", String(enabled));
+  btn.style.borderColor = enabled ? "var(--success)" : "var(--border)";
+  btn.style.background = enabled ? "rgba(34,197,94,0.12)" : "transparent";
+  btn.style.color = enabled ? "var(--success)" : "var(--text)";
+}
+
+function toggleCompressMode() {
+  const btn = document.getElementById("broadcast-compress-toggle");
+  if (!btn) return;
+  btn.dataset.compress = btn.dataset.compress === "true" ? "false" : "true";
+  updateCompressToggleButton();
+  saveBroadcastPrefs();
 }
 
 function loadBroadcastPrefs() {
@@ -525,10 +546,18 @@ async function doApprove(id) {
   const prefs = loadBroadcastPrefs();
   const savedJids = prefs?.selectedJids ? new Set(prefs.selectedJids) : null;
   const savedDelay = prefs?.delay || "5";
+  const savedCompress = prefs?.compressVideo ?? false;
 
   // Set delay input
   const delayInput = document.getElementById("broadcast-delay-input");
   if (delayInput) delayInput.value = savedDelay;
+
+  const compressToggle = document.getElementById("broadcast-compress-toggle");
+  if (compressToggle) {
+    compressToggle.dataset.compress = String(Boolean(savedCompress));
+    compressToggle.onclick = toggleCompressMode;
+    updateCompressToggleButton();
+  }
 
   // Populate groups list
   const list = document.getElementById("broadcast-groups-list");
@@ -594,6 +623,7 @@ async function confirmBroadcast() {
 
   const delayMs = parseInt(document.getElementById("broadcast-delay-input").value, 10) || 0;
   const targetGroups = Array.from(document.querySelectorAll(".broadcast-group-cb:checked")).map(cb => cb.value);
+  const compressVideo = document.getElementById("broadcast-compress-toggle")?.dataset.compress === "true";
 
   // Persist these choices for next time
   saveBroadcastPrefs();
@@ -602,7 +632,7 @@ async function confirmBroadcast() {
     const r = await fetch(`/api/approve/${id}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ targetGroups, delayMs })
+      body: JSON.stringify({ targetGroups, delayMs, compressVideo })
     });
     if (!r.ok) throw new Error((await r.json()).error);
     delete state.approvals[id];
