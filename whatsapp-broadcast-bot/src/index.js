@@ -27,10 +27,17 @@ const bus = require("./events");
 function getGroupSettings() {
   try {
     const groups = loadGroups();
-    return {
-      MAIN_GROUP: groups.mainGroup || process.env.MAIN_GROUP_JID,
-      CONTROL_CHAT: groups.controlChatJid || process.env.CONTROL_CHAT_JID,
-    };
+    const MAIN_GROUP = groups.mainGroup || process.env.MAIN_GROUP_JID;
+    const CONTROL_CHAT = groups.controlChatJid || process.env.CONTROL_CHAT_JID;
+
+    if (MAIN_GROUP && CONTROL_CHAT && MAIN_GROUP === CONTROL_CHAT) {
+      logger.warn(
+        { MAIN_GROUP, CONTROL_CHAT },
+        "MAIN_GROUP and CONTROL_CHAT are the same JID. This is usually a config mistake and will block source-group media approvals."
+      );
+    }
+
+    return { MAIN_GROUP, CONTROL_CHAT };
   } catch (err) {
     return {
       MAIN_GROUP: process.env.MAIN_GROUP_JID,

@@ -4,6 +4,7 @@ const { downloadMediaMessage } = require("baileys");
 const logger = require("./utils/logger");
 const bus = require("./events");
 const { getGroupName } = require("./utils/groupCache");
+const { compressVideo, resolveVideoThumbnail } = require("./utils/videoCompressor");
 
 const GROUPS_PATH = path.join(__dirname, "..", "config", "groups.json");
 
@@ -66,6 +67,15 @@ async function broadcastToGroups(sock, originalMsg, options = {}) {
   }
 
   logger.info("Media downloaded successfully, starting broadcast loop...");
+  
+  let videoThumbnail = null;
+
+  // Compress video if enabled and media type is video (preserves audio)
+  if (mediaType === "video") {
+    buffer = await compressVideo(buffer, "mp4");
+    videoThumbnail = await resolveVideoThumbnail(originalMsg, buffer);
+  }
+  
   bus.emit("broadcast:start", { count: targetGroups.filter(Boolean).length });
 
   for (const jid of targetGroups) {
@@ -78,8 +88,10 @@ async function broadcastToGroups(sock, originalMsg, options = {}) {
       const sendParams = { caption };
       if (mediaType === "image") {
         sendParams.image = buffer;
+        if (videoThumbnail) sendParams.jpegThumbnail = videoThumbnail;
       } else {
         sendParams.video = buffer;
+        if (videoThumbnail) sendParams.jpegThumbnail = videoThumbnail;
         const vmsg = originalMsg?.message?.videoMessage || {};
         if (vmsg.fileName) sendParams.fileName = vmsg.fileName;
         // Provide a sensible default mimetype so Baileys treats this as a video upload
@@ -116,6 +128,15 @@ async function broadcastRawMedia(sock, buffer, mediaType, caption, options = {})
   const failed = [];
 
   logger.info({ groupCount: targetGroups.filter(Boolean).length }, "Starting raw media broadcast...");
+  
+  let videoThumbnail = null;
+
+  // Compress video if enabled and media type is video (preserves audio)
+  if (mediaType === "video") {
+    buffer = await compressVideo(buffer, "mp4");
+    videoThumbnail = await resolveVideoThumbnail(null, buffer);
+  }
+  
   bus.emit("broadcast:start", { count: targetGroups.filter(Boolean).length });
 
   for (const jid of targetGroups) {
@@ -127,8 +148,10 @@ async function broadcastRawMedia(sock, buffer, mediaType, caption, options = {})
       const sendParams = { caption };
       if (mediaType === "image") {
         sendParams.image = buffer;
+        if (videoThumbnail) sendParams.jpegThumbnail = videoThumbnail;
       } else {
         sendParams.video = buffer;
+        if (videoThumbnail) sendParams.jpegThumbnail = videoThumbnail;
         // Raw media from dashboard: provide defaults so WA treats it as a proper video
         sendParams.fileName = options.fileName || "video.mp4";
         sendParams.mimetype = options.mimetype || "video/mp4";

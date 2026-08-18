@@ -653,12 +653,12 @@ const ACTIVITY_ICONS = {
 const ACTIVITY_LABELS = {
   "bot:connected": () => "<strong>Bot connected</strong>",
   "bot:disconnected": () => "<strong>Bot disconnected</strong>",
-  "approval:new": (d) => `<strong>New request</strong> &mdash; ${d.id} (${d.mediaType})`,
+  "approval:new": (d) => `<strong>New request</strong> &mdash; ${d.id} (${d.mediaType}) from <strong>${d.sourceGroupName || 'Unknown'}</strong>`,
   "approval:resolved": (d) => `<strong>Request ${d.id}</strong> ${d.decision === "yes" ? "approved" : "rejected"}`,
   "approval:expired": (d) => `<strong>Request ${d.id}</strong> expired`,
   "broadcast:start": (d) => `<strong>Broadcast started</strong> &mdash; ${d.count} targets`,
-  "broadcast:sent": (d) => `<strong>Sent</strong> to <code>${getGroupName(d.jid)}</code>`,
-  "broadcast:failed": (d) => `<strong>Failed</strong> to <code>${getGroupName(d.jid)}</code>`,
+  "broadcast:sent": (d) => `<strong>Sent</strong> to <strong>${d.groupName || getGroupName(d.jid)}</strong>`,
+  "broadcast:failed": (d) => `<strong>Failed</strong> to <strong>${d.groupName || getGroupName(d.jid)}</strong>`,
   "broadcast:complete": (d) => `<strong>Complete</strong> &mdash; ${d.sent} sent, ${d.failed} failed`,
 };
 

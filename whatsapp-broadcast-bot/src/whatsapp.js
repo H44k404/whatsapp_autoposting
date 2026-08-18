@@ -80,42 +80,90 @@ function upsertMessages(jid, msgs, type) {
   if (arr.length > 200) arr.splice(0, arr.length - 200);
 }
 
+// ── Connection state management ──────────────────────────────────────────
+let currentSocket = null;
+let reconnectAttempts = 0;
+let botStartInProgress = false;
+let reconnectTimer = null;
+const MAX_RECONNECT_ATTEMPTS = 5;
+const BASE_RECONNECT_DELAY = 3000;
+
+// Exponential backoff: 3s, 6s, 12s, 24s, 48s
+function getReconnectDelay() {
+  return BASE_RECONNECT_DELAY * Math.pow(2, Math.min(reconnectAttempts, 4));
+}
+
+// Properly cleanup socket and listeners
+async function cleanupSocket(sock) {
+  if (!sock) return;
+  try {
+    // Remove all event listeners to prevent memory leaks
+    sock.ev.removeAllListeners();
+    // Close the socket connection
+    sock.end();
+  } catch (e) {
+    logger.debug({ err: e.message }, "Error during socket cleanup");
+  }
+}
+
 /**
  * Starts (or reconnects) the Baileys WhatsApp Web socket.
  * @param {(sock: import("baileys").WASocket) => void} onReady
  */
 async function startBot(onReady) {
-  bus.emit("bot:connecting");
-  const { state, saveCreds } = await useMultiFileAuthState("./auth");
-
-  let version;
-  try {
-    const result = await fetchLatestBaileysVersion();
-    version = result.version;
-    logger.info({ version }, "Using WA Web version");
-  } catch (e) {
-    logger.warn({ err: e.message }, "fetchLatestBaileysVersion failed, using bundled version");
-    version = undefined;
+  if (botStartInProgress) {
+    logger.debug("Bot startup already in progress; skipping duplicate start request.");
+    return currentSocket;
   }
 
-  const sock = makeWASocket({
-    auth: state,
-    ...(version ? { version } : {}),
-    logger: silentLogger,
-    printQRInTerminal: false,
-  });
+  if (currentSocket && currentSocket.user) {
+    logger.debug("Bot already connected; skipping duplicate start request.");
+    return currentSocket;
+  }
 
-  // ── Capture incoming messages into our store ────────────────────────────────
-  sock.ev.on("messages.upsert", ({ messages, type }) => {
-    for (const m of messages) {
-      if (!m.message) continue;
-      const jid = m.key.remoteJid;
-      if (!jid || !jid.endsWith("@g.us")) continue; // only store group messages
-      upsertMessages(jid, [m], type);
+  botStartInProgress = true;
+  bus.emit("bot:connecting");
+
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState("./auth");
+
+    let version;
+    try {
+      const result = await fetchLatestBaileysVersion();
+      version = result.version;
+      logger.info({ version }, "Using WA Web version");
+    } catch (e) {
+      logger.warn({ err: e.message }, "fetchLatestBaileysVersion failed, using bundled version");
+      version = undefined;
     }
-  });
 
-  sock.ev.on("connection.update", (update) => {
+    const sock = makeWASocket({
+      auth: state,
+      ...(version ? { version } : {}),
+      logger: silentLogger,
+      printQRInTerminal: false,
+      // Improve connection stability
+      retryRequestDelayMs: 100,
+      maxMsgsInInterval: 10,
+      msgIntervalMs: 1000,
+      keepAliveIntervalMs: 10000,
+      emitOwnEventsFlag: true,
+    });
+
+    // Store reference to current socket
+    currentSocket = sock;
+
+    // ── Capture incoming messages into our store ────────────────────────────────
+    sock.ev.on("messages.upsert", ({ messages, type }) => {
+      for (const m of messages) {
+        if (!m.message) continue;
+        const jid = m.key.remoteJid;
+        if (!jid || !jid.endsWith("@g.us")) continue; // only store group messages
+        upsertMessages(jid, [m], type);
+      }
+    });
+
+    sock.ev.on("connection.update", async (update) => {
     const { connection, qr, lastDisconnect } = update;
 
     if (qr) {
@@ -129,20 +177,54 @@ async function startBot(onReady) {
 
     if (connection === "close") {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-      logger.warn({ statusCode, shouldReconnect }, "Connection closed.");
-      if (shouldReconnect) {
-        setTimeout(() => {
+      const isConnectionReplaced = statusCode === DisconnectReason.connectionReplaced;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut && !isConnectionReplaced;
+
+      logger.warn(
+        { statusCode, shouldReconnect, reconnectAttempts, isConnectionReplaced },
+        isConnectionReplaced
+          ? "Connection replaced by another WhatsApp session. Stopping auto-reconnect to avoid a loop."
+          : "Connection closed. Attempting recovery..."
+      );
+
+      // Cleanup the failed socket
+      await cleanupSocket(sock);
+      currentSocket = null;
+
+      if (isConnectionReplaced) {
+        logger.error("Another active WhatsApp session was detected. Please log out from other devices and re-run the QR link process.");
+        bus.emit("bot:disconnected");
+        reconnectAttempts = 0;
+        return;
+      }
+
+      if (shouldReconnect && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        reconnectAttempts++;
+        const delay = getReconnectDelay();
+        logger.info(
+          { attempt: reconnectAttempts, maxAttempts: MAX_RECONNECT_ATTEMPTS, delayMs: delay },
+          `Reconnecting in ${delay}ms...`
+        );
+
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
           startBot(onReady).catch((err) => {
             logger.error({ err: err.message, stack: err.stack }, "Failed to reconnect WhatsApp socket");
             bus.emit("bot:disconnected");
           });
-        }, 3000);
+        }, delay);
+      } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        logger.error("Max reconnection attempts reached. Please restart the bot.");
+        bus.emit("bot:disconnected");
+        reconnectAttempts = 0;
       } else {
         logger.error("Logged out from WhatsApp. Delete the ./auth folder and re-scan the QR code to reconnect.");
         bus.emit("bot:logged_out");
+        reconnectAttempts = 0;
       }
     } else if (connection === "open") {
+      reconnectAttempts = 0; // Reset on successful connection
       logger.info("✅ Connected to WhatsApp");
       bus.emit("bot:connected");
       Promise.resolve(onReady(sock)).catch((err) => {
@@ -151,9 +233,12 @@ async function startBot(onReady) {
     }
   });
 
-  sock.ev.on("creds.update", saveCreds);
+    sock.ev.on("creds.update", saveCreds);
 
-  return sock;
+    return sock;
+  } finally {
+    botStartInProgress = false;
+  }
 }
 
-module.exports = { startBot, messageStore };
+module.exports = { startBot, messageStore, cleanupSocket };
