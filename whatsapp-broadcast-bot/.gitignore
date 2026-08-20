@@ -1,5 +1,7 @@
 # Dependencies
 node_modules/
+data/workspaces/*/message-store.json
+data/workspaces/*/pending_approvals.json
 
 # WhatsApp auth session (contains login credentials — never commit)
 auth/
