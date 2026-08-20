@@ -100,9 +100,20 @@
         </svg>
         Target Groups
       </a>
+      <a class="nav-item admin-only" data-section="team" style="display:none;">
+        <svg viewBox="0 0 24 24"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5s-3 1.34-3 3 1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5C15 14.17 10.33 13 8 13zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z" /></svg>
+        Team
+      </a>
     </nav>
 
     <div class="sidebar-footer" style="display: flex; flex-direction: column; gap: 10px; padding: 16px 20px;">
+      <div class="account-profile" id="account-profile" aria-label="Signed-in account">
+        <div class="account-avatar" id="account-avatar">?</div>
+        <div class="account-details">
+          <strong id="account-username">Loading account...</strong>
+          <span id="account-role">Workspace account</span>
+        </div>
+      </div>
       <div class="bot-status-pill" id="status-pill">
         <span class="status-dot" id="status-dot"></span>
         <span id="status-text">Connecting…</span>
@@ -176,6 +187,7 @@
           </div>
           <button class="btn-outline" onclick="resetSession()" style="padding: 6px 12px; font-size: 12px;">Reset &
             Relink Session</button>
+          <button id="connect-whatsapp" class="btn-primary" onclick="connectWorkspace()" style="padding: 6px 12px; font-size: 12px;">Connect WhatsApp</button>
         </div>
         <div style="display: flex; gap: 24px; align-items: center; flex-wrap: wrap;">
           <div id="qr-container"
@@ -382,6 +394,36 @@
           </div>
         </div>
 
+      </div>
+    </section>
+
+    <!-- TEAM / SUPER ADMIN -->
+    <section class="content-section" id="section-team">
+      <div class="team-page">
+        <div class="team-hero">
+          <div class="team-hero-mark">✦</div>
+          <div><div class="team-kicker">Super admin workspace</div><h2>Team accounts</h2><p>Create secure worker access and keep every workspace accountable.</p></div>
+          <button class="btn-primary team-refresh" type="button" onclick="loadTeamUsers()">Refresh</button>
+        </div>
+        <div class="glass-card team-card">
+          <div class="card-header">
+          <div>
+            <div class="card-title">Create a worker</div>
+            <div class="team-card-subtitle">Each account receives its own workspace.</div>
+          </div>
+          </div>
+          <form id="create-worker-form" class="worker-form">
+            <label class="team-field"><span>Username</span><input id="worker-username" required minlength="3" maxlength="64" pattern="[a-zA-Z0-9._-]+" autocomplete="off" placeholder="e.g. maya.ops" /></label>
+            <label class="team-field"><span>Temporary password</span><input id="worker-password" required minlength="12" type="password" autocomplete="new-password" placeholder="At least 12 characters" /></label>
+            <label class="team-field"><span>Workspace name</span><input id="worker-workspace" required maxlength="120" placeholder="e.g. Colombo team" /></label>
+            <button class="btn-primary worker-submit" type="submit">Create worker</button>
+          </form>
+          <div id="team-message" class="team-message"></div>
+        </div>
+        <div class="glass-card team-card team-directory">
+          <div class="card-header"><div><div class="card-title">Directory</div><div class="team-card-subtitle">Active accounts and workspace ownership.</div></div><span class="directory-label">LIVE</span></div>
+          <div class="team-table-wrap"><table class="team-table"><thead><tr><th>Username</th><th>Role</th><th>Workspace</th><th>Status</th><th>Action</th></tr></thead><tbody id="team-users-list"><tr><td colspan="5" class="team-empty">Loading accounts…</td></tr></tbody></table></div>
+        </div>
       </div>
     </section>
   </main>

@@ -1,0 +1,8 @@
+{
+  "mainGroup": "main@g.us",
+  "targetGroups": [
+    "g1@g.us",
+    "g2@g.us",
+    "g3@g.us"
+  ]
+}

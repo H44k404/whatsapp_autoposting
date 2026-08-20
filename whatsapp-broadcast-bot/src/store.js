@@ -4,74 +4,68 @@
  */
 const fs = require("fs");
 const path = require("path");
-
-const DATA_DIR = path.join(__dirname, "..", "data");
-const FILE_PATH = path.join(DATA_DIR, "pending_approvals.json");
-const MEDIA_DIR = path.join(DATA_DIR, "media");
+const { ensureWorkspace } = require("./workspace");
 
 // In-memory cache: id → Buffer (write-through to disk)
 const mediaCache = new Map();
 
-function ensureDataFile() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(MEDIA_DIR)) fs.mkdirSync(MEDIA_DIR, { recursive: true });
-  if (!fs.existsSync(FILE_PATH)) fs.writeFileSync(FILE_PATH, "{}");
+function paths(workspaceId) {
+  return ensureWorkspace(workspaceId);
 }
 
-function readAll() {
-  ensureDataFile();
+function readAll(workspaceId) {
+  const { pending } = paths(workspaceId);
   try {
-    return JSON.parse(fs.readFileSync(FILE_PATH, "utf-8"));
+    return JSON.parse(fs.readFileSync(pending, "utf-8"));
   } catch (e) {
     console.error("pending_approvals.json is corrupt, ignoring it:", e.message);
     return {};
   }
 }
 
-function writeAll(data) {
-  ensureDataFile();
-  fs.writeFileSync(FILE_PATH, JSON.stringify(data, null, 2));
+function writeAll(data, workspaceId) {
+  fs.writeFileSync(paths(workspaceId).pending, JSON.stringify(data, null, 2));
 }
 
-function savePending(id, entry) {
-  const all = readAll();
+function savePending(id, entry, workspaceId) {
+  const all = readAll(workspaceId);
   all[id] = entry;
-  writeAll(all);
+  writeAll(all, workspaceId);
 }
 
-function getPending(id) {
-  return readAll()[id];
+function getPending(id, workspaceId) {
+  return readAll(workspaceId)[id];
 }
 
-function deletePending(id) {
-  const all = readAll();
+function deletePending(id, workspaceId) {
+  const all = readAll(workspaceId);
   delete all[id];
-  writeAll(all);
+  writeAll(all, workspaceId);
   // Remove from cache
   mediaCache.delete(id);
   // Remove from disk
   for (const ext of ["jpg", "mp4"]) {
-    const filePath = path.join(MEDIA_DIR, `${id}.${ext}`);
+    const filePath = path.join(paths(workspaceId).media, `${id}.${ext}`);
     if (fs.existsSync(filePath)) {
       try { fs.unlinkSync(filePath); } catch (_) {}
     }
   }
 }
 
-function saveMediaBuffer(id, buffer, mediaType) {
-  ensureDataFile();
+function saveMediaBuffer(id, buffer, mediaType, workspaceId) {
+  const { media } = paths(workspaceId);
   const ext = mediaType === "video" ? "mp4" : "jpg";
-  const filePath = path.join(MEDIA_DIR, `${id}.${ext}`);
+  const filePath = path.join(media, `${id}.${ext}`);
   fs.writeFileSync(filePath, buffer);
   mediaCache.set(id, buffer);
 }
 
-function getMediaBuffer(id) {
+function getMediaBuffer(id, workspaceId) {
   // Check in-memory cache first
   if (mediaCache.has(id)) return mediaCache.get(id);
   // Try to load from disk (both possible extensions)
   for (const ext of ["jpg", "mp4"]) {
-    const filePath = path.join(MEDIA_DIR, `${id}.${ext}`);
+    const filePath = path.join(paths(workspaceId).media, `${id}.${ext}`);
     if (fs.existsSync(filePath)) {
       try {
         const buf = fs.readFileSync(filePath);

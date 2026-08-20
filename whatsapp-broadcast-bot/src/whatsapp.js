@@ -11,50 +11,51 @@ const fs = require("fs");
 const path = require("path");
 const logger = require("./utils/logger");
 const bus = require("./events");
+const { ADMIN_WORKSPACE_ID, ensureWorkspace } = require("./workspace");
 
-const STORE_PATH = path.join(__dirname, "..", "data", "message-store.json");
 const silentLogger = pino({ level: "silent" });
 
 // ── Simple message store ─────────────────────────────────────────────────────
 // Maps jid → Array of message objects (most-recent last, capped at 200 per chat)
-const messageStore = {};
-
-// Load persisted store from disk if it exists
-if (fs.existsSync(STORE_PATH)) {
-  try {
-    const raw = JSON.parse(fs.readFileSync(STORE_PATH, "utf-8"));
-    Object.assign(messageStore, raw);
-    logger.info("Message store loaded from disk");
-  } catch (e) {
-    logger.warn({ err: e.message }, "Could not load message store — starting fresh");
+const messageStores = new Map();
+function getMessageStore(workspaceId = ADMIN_WORKSPACE_ID) {
+  if (!messageStores.has(workspaceId)) {
+    const store = {};
+    const storePath = ensureWorkspace(workspaceId).messages;
+    if (fs.existsSync(storePath)) {
+      try { Object.assign(store, JSON.parse(fs.readFileSync(storePath, "utf-8"))); } catch (e) {
+        logger.warn({ err: e.message, workspaceId }, "Could not load workspace message store");
+      }
+    }
+    messageStores.set(workspaceId, store);
   }
+  return messageStores.get(workspaceId);
 }
 
-function persistStore() {
+function persistStore(workspaceId) {
   try {
-    const dir = path.dirname(STORE_PATH);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(STORE_PATH, JSON.stringify(messageStore));
+    const storePath = ensureWorkspace(workspaceId).messages;
+    fs.writeFileSync(storePath, JSON.stringify(getMessageStore(workspaceId)));
   } catch (e) {
     logger.warn({ err: e.message }, "Could not persist message store to disk");
   }
 }
 
 // Save every 30 seconds and on clean exit
-setInterval(persistStore, 30_000);
-process.on("exit", persistStore);
-process.on("SIGINT", () => { persistStore(); process.exit(); });
-process.on("SIGTERM", () => { persistStore(); process.exit(); });
+setInterval(() => { for (const workspaceId of messageStores.keys()) persistStore(workspaceId); }, 30_000);
+process.on("exit", () => { for (const workspaceId of messageStores.keys()) persistStore(workspaceId); });
+process.on("SIGINT", () => { for (const workspaceId of messageStores.keys()) persistStore(workspaceId); process.exit(); });
+process.on("SIGTERM", () => { for (const workspaceId of messageStores.keys()) persistStore(workspaceId); process.exit(); });
 
 /**
  * Upsert messages into the store (add new / replace by key.id).
  * Messages are stored as plain objects — media content is NOT stored (too large);
  * only the message envelope is kept so the key can be used later for on-demand download.
  */
-function upsertMessages(jid, msgs, type) {
+function upsertMessages(store, jid, msgs, type) {
   if (!jid) return;
-  if (!messageStore[jid]) messageStore[jid] = [];
-  const arr = messageStore[jid];
+  if (!store[jid]) store[jid] = [];
+  const arr = store[jid];
 
   for (const m of msgs) {
     // Strip the actual media payload — store only the message envelope (key + metadata)
@@ -81,16 +82,13 @@ function upsertMessages(jid, msgs, type) {
 }
 
 // ── Connection state management ──────────────────────────────────────────
-let currentSocket = null;
-let reconnectAttempts = 0;
-let botStartInProgress = false;
-let reconnectTimer = null;
+const runtimes = new Map();
 const MAX_RECONNECT_ATTEMPTS = 5;
 const BASE_RECONNECT_DELAY = 3000;
 
 // Exponential backoff: 3s, 6s, 12s, 24s, 48s
 function getReconnectDelay() {
-  return BASE_RECONNECT_DELAY * Math.pow(2, Math.min(reconnectAttempts, 4));
+  return BASE_RECONNECT_DELAY;
 }
 
 // Properly cleanup socket and listeners
@@ -110,22 +108,26 @@ async function cleanupSocket(sock) {
  * Starts (or reconnects) the Baileys WhatsApp Web socket.
  * @param {(sock: import("baileys").WASocket) => void} onReady
  */
-async function startBot(onReady) {
-  if (botStartInProgress) {
+async function startBot(workspaceIdOrOnReady, onReadyArg) {
+  const workspaceId = typeof workspaceIdOrOnReady === "function" ? ADMIN_WORKSPACE_ID : workspaceIdOrOnReady;
+  const onReady = typeof workspaceIdOrOnReady === "function" ? workspaceIdOrOnReady : onReadyArg;
+  const runtime = runtimes.get(workspaceId) || { socket: null, attempts: 0, starting: false, timer: null };
+  runtimes.set(workspaceId, runtime);
+  if (runtime.starting) {
     logger.debug("Bot startup already in progress; skipping duplicate start request.");
-    return currentSocket;
+    return runtime.socket;
   }
 
-  if (currentSocket && currentSocket.user) {
+  if (runtime.socket && runtime.socket.user) {
     logger.debug("Bot already connected; skipping duplicate start request.");
-    return currentSocket;
+    return runtime.socket;
   }
 
-  botStartInProgress = true;
-  bus.emit("bot:connecting");
+  runtime.starting = true;
+  bus.emit("bot:connecting", { workspaceId });
 
   try {
-    const { state, saveCreds } = await useMultiFileAuthState("./auth");
+    const { state, saveCreds } = await useMultiFileAuthState(ensureWorkspace(workspaceId).auth);
 
     let version;
     try {
@@ -151,7 +153,9 @@ async function startBot(onReady) {
     });
 
     // Store reference to current socket
-    currentSocket = sock;
+    sock.workspaceId = workspaceId;
+    runtime.socket = sock;
+    const messageStore = getMessageStore(workspaceId);
 
     // ── Capture incoming messages into our store ────────────────────────────────
     sock.ev.on("messages.upsert", ({ messages, type }) => {
@@ -159,7 +163,7 @@ async function startBot(onReady) {
         if (!m.message) continue;
         const jid = m.key.remoteJid;
         if (!jid || !jid.endsWith("@g.us")) continue; // only store group messages
-        upsertMessages(jid, [m], type);
+        upsertMessages(messageStore, jid, [m], type);
       }
     });
 
@@ -169,9 +173,9 @@ async function startBot(onReady) {
     if (qr) {
       logger.info("Scan this QR code with the BOT's WhatsApp number (Linked Devices → Link a Device):");
       qrcode.generate(qr, { small: true });
-      bus.emit("bot:qr", { qr });
+      bus.emit("bot:qr", { workspaceId, qr });
       qrcodeLib.toDataURL(qr, (err, url) => {
-        if (!err) bus.emit("bot:qr_dataurl", url);
+        if (!err) bus.emit("bot:qr_dataurl", { workspaceId, url });
       });
     }
 
@@ -181,7 +185,7 @@ async function startBot(onReady) {
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut && !isConnectionReplaced;
 
       logger.warn(
-        { statusCode, shouldReconnect, reconnectAttempts, isConnectionReplaced },
+        { statusCode, shouldReconnect, reconnectAttempts: runtime.attempts, isConnectionReplaced, workspaceId },
         isConnectionReplaced
           ? "Connection replaced by another WhatsApp session. Stopping auto-reconnect to avoid a loop."
           : "Connection closed. Attempting recovery..."
@@ -189,44 +193,44 @@ async function startBot(onReady) {
 
       // Cleanup the failed socket
       await cleanupSocket(sock);
-      currentSocket = null;
+      runtime.socket = null;
 
       if (isConnectionReplaced) {
         logger.error("Another active WhatsApp session was detected. Please log out from other devices and re-run the QR link process.");
-        bus.emit("bot:disconnected");
-        reconnectAttempts = 0;
+        bus.emit("bot:disconnected", { workspaceId });
+        runtime.attempts = 0;
         return;
       }
 
-      if (shouldReconnect && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-        reconnectAttempts++;
-        const delay = getReconnectDelay();
+      if (shouldReconnect && runtime.attempts < MAX_RECONNECT_ATTEMPTS) {
+        runtime.attempts++;
+        const delay = BASE_RECONNECT_DELAY * Math.pow(2, Math.min(runtime.attempts - 1, 4));
         logger.info(
-          { attempt: reconnectAttempts, maxAttempts: MAX_RECONNECT_ATTEMPTS, delayMs: delay },
+          { attempt: runtime.attempts, maxAttempts: MAX_RECONNECT_ATTEMPTS, delayMs: delay, workspaceId },
           `Reconnecting in ${delay}ms...`
         );
 
-        if (reconnectTimer) clearTimeout(reconnectTimer);
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null;
-          startBot(onReady).catch((err) => {
+        if (runtime.timer) clearTimeout(runtime.timer);
+        runtime.timer = setTimeout(() => {
+          runtime.timer = null;
+          startBot(workspaceId, onReady).catch((err) => {
             logger.error({ err: err.message, stack: err.stack }, "Failed to reconnect WhatsApp socket");
-            bus.emit("bot:disconnected");
+            bus.emit("bot:disconnected", { workspaceId });
           });
         }, delay);
-      } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      } else if (runtime.attempts >= MAX_RECONNECT_ATTEMPTS) {
         logger.error("Max reconnection attempts reached. Please restart the bot.");
-        bus.emit("bot:disconnected");
-        reconnectAttempts = 0;
+        bus.emit("bot:disconnected", { workspaceId });
+        runtime.attempts = 0;
       } else {
         logger.error("Logged out from WhatsApp. Delete the ./auth folder and re-scan the QR code to reconnect.");
-        bus.emit("bot:logged_out");
-        reconnectAttempts = 0;
+        bus.emit("bot:logged_out", { workspaceId });
+        runtime.attempts = 0;
       }
     } else if (connection === "open") {
-      reconnectAttempts = 0; // Reset on successful connection
+      runtime.attempts = 0; // Reset on successful connection
       logger.info("✅ Connected to WhatsApp");
-      bus.emit("bot:connected");
+      bus.emit("bot:connected", { workspaceId });
       Promise.resolve(onReady(sock)).catch((err) => {
         logger.error({ err: err.message, stack: err.stack }, "WhatsApp onReady handler failed");
       });
@@ -237,8 +241,8 @@ async function startBot(onReady) {
 
     return sock;
   } finally {
-    botStartInProgress = false;
+    runtime.starting = false;
   }
 }
 
-module.exports = { startBot, messageStore, cleanupSocket };
+module.exports = { startBot, messageStore: getMessageStore(ADMIN_WORKSPACE_ID), getMessageStore, cleanupSocket, getSocket: (workspaceId) => runtimes.get(workspaceId)?.socket || null };

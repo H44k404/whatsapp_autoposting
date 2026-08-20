@@ -24,9 +24,9 @@ const { loadGroups, getGroupName } = require("./broadcaster");
 const logger = require("./utils/logger");
 const bus = require("./events");
 
-function getGroupSettings() {
+function getGroupSettings(workspaceId) {
   try {
-    const groups = loadGroups();
+    const groups = loadGroups(workspaceId);
     const MAIN_GROUP = groups.mainGroup || process.env.MAIN_GROUP_JID;
     const CONTROL_CHAT = groups.controlChatJid || process.env.CONTROL_CHAT_JID;
 
@@ -70,23 +70,22 @@ function extractMediaInfo(msg) {
 const fs = require("fs");
 
 // Hold a reference to the active socket so the dashboard API can use it.
-let currentSock = null;
-let messageHandlerAttached = false;
-const getSock = () => currentSock;
+const sockets = new Map();
+const attached = new Set();
+const getSock = (workspaceId) => sockets.get(workspaceId || "admin") || null;
 
-// Start the web dashboard server before the bot connects.
-createServer(handleControlReply, getSock);
+// Start WhatsApp only after this process has successfully claimed the dashboard port.
+const dashboardServer = createServer(handleControlReply, getSock, connectWorkspace);
 
-function connectBot() {
-  messageHandlerAttached = false; // Reset flag on new connection attempt
+function connectWorkspace(workspaceId = "admin") {
+  attached.delete(workspaceId);
   
-  return startBot(async (sock) => {
-    currentSock = sock;
-    bus.emit("bot:connected");
+  return startBot(workspaceId, async (sock) => {
+    sockets.set(workspaceId, sock);
 
     // Only attach message handler once per socket to prevent duplicate listeners
-    if (!messageHandlerAttached) {
-      messageHandlerAttached = true;
+    if (!attached.has(workspaceId)) {
+      attached.add(workspaceId);
       
       sock.ev.on("messages.upsert", async ({ messages }) => {
         for (const msg of messages) {
@@ -95,9 +94,11 @@ function connectBot() {
             const from = msg.key.remoteJid;
             const isFromMe = msg.key.fromMe;
 
-            const { MAIN_GROUP, CONTROL_CHAT } = getGroupSettings();
+            const { MAIN_GROUP, CONTROL_CHAT } = getGroupSettings(workspaceId);
             const { raw, imageMsg, videoMsg, documentMsg, hasMedia, mediaType, caption } = extractMediaInfo(msg);
-            const isSourceGroup = MAIN_GROUP && from === MAIN_GROUP && !isFromMe;
+            // The connected WhatsApp account may be the account posting media
+            // into the source group, so source matching must not reject fromMe.
+            const isSourceGroup = MAIN_GROUP && from === MAIN_GROUP;
             const isControlChat = CONTROL_CHAT && (from === CONTROL_CHAT || from === `${CONTROL_CHAT.split("@")[0]}@s.whatsapp.net`);
 
             // Get group name for logging
@@ -121,7 +122,7 @@ function connectBot() {
             );
 
             // Case 1: media posted in the main (source) group
-            // Skip own messages in the group (the bot shouldn't react to its own sends)
+            // Only media in the configured source group creates an approval.
             if (isSourceGroup && hasMedia && mediaType) {
               try {
                 const id = await requestApproval(sock, msg, mediaType, caption);
@@ -146,6 +147,7 @@ function connectBot() {
                 (msg.message.audioMessage ? "[Audio]" : null);
               if (text) {
                 bus.emit("chat:message", {
+                  workspaceId,
                   jid: from,
                   groupName,
                   id: msg.key.id,
@@ -176,19 +178,24 @@ function connectBot() {
     }
   }).catch((err) => {
     logger.error({ err: err.message, stack: err.stack }, "Failed to start WhatsApp bot");
-    currentSock = null;
-    messageHandlerAttached = false;
-    bus.emit("bot:disconnected");
+    sockets.delete(workspaceId);
+    attached.delete(workspaceId);
+    bus.emit("bot:disconnected", { workspaceId });
   });
 }
 
-// Start initial connection
-connectBot();
+// Start the initial connection only after the dashboard is listening. This prevents
+// a second npm start process from sharing auth state when port 3000 is occupied.
+dashboardServer.ready.then(() => connectWorkspace("admin")).catch((err) => {
+  logger.error({ err: err.message, port: process.env.DASHBOARD_PORT || 3000 }, "Dashboard failed to start; WhatsApp startup aborted");
+  process.exit(1);
+});
 
 // Listen to reset requests from server
-bus.on("bot:reset_session", async () => {
-  logger.info("Reset session triggered. Logging out...");
-  messageHandlerAttached = false; // Reset listener flag
+bus.on("bot:reset_session", async ({ workspaceId = "admin" } = {}) => {
+  logger.info({ workspaceId }, "Reset session triggered. Logging out...");
+  attached.delete(workspaceId);
+  const currentSock = sockets.get(workspaceId);
   
   if (currentSock) {
     const origLog = console.log;
@@ -200,7 +207,7 @@ bus.on("bot:reset_session", async () => {
     } finally {
       console.log = origLog;
       await cleanupSocket(currentSock);
-      currentSock = null;
+      sockets.delete(workspaceId);
     }
   }
   
@@ -208,13 +215,13 @@ bus.on("bot:reset_session", async () => {
   await new Promise(resolve => setTimeout(resolve, 1000));
   
   try {
-    fs.rmSync(path.join(__dirname, "..", "auth"), { recursive: true, force: true });
+    fs.rmSync(require("./workspace").ensureWorkspace(workspaceId).auth, { recursive: true, force: true });
     logger.info("Credentials cleared successfully.");
   } catch (err) {
     logger.warn({ err: err.message }, "Auth folder delete failed or did not exist.");
   }
   
-  connectBot();
+  connectWorkspace(workspaceId);
 });
 
 process.on("unhandledRejection", (err) => {

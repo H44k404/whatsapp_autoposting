@@ -9,9 +9,9 @@ const bus = require("./events");
 // parseFloat (not parseInt) so fractional-minute timeouts work correctly too
 const TIMEOUT_MS = (parseFloat(process.env.APPROVAL_TIMEOUT_MINUTES) || 30) * 60000;
 
-function getControlChat() {
+function getControlChat(workspaceId) {
   try {
-    const groups = loadGroups();
+    const groups = loadGroups(workspaceId);
     return groups.controlChatJid || process.env.CONTROL_CHAT_JID;
   } catch (err) {
     return process.env.CONTROL_CHAT_JID;
@@ -84,7 +84,8 @@ function extractThumbnailFromMessage(msg) {
  * Also downloads a media preview for the dashboard and emits approval:new.
  */
 async function requestApproval(sock, originalMsg, mediaType, caption) {
-  const CONTROL_CHAT = getControlChat();
+  const workspaceId = sock.workspaceId;
+  const CONTROL_CHAT = getControlChat(workspaceId);
   
   if (!CONTROL_CHAT) {
     throw new Error("CONTROL_CHAT_JID is not set in .env or config/groups.json — cannot send approval requests.");
@@ -114,7 +115,7 @@ async function requestApproval(sock, originalMsg, mediaType, caption) {
     isDashboardUpload: false,
     sourceGroupJid,
     sourceGroupName,
-  });
+  }, workspaceId);
 
   // Download media with retry logic
   let mediaBuffer = null;
@@ -127,7 +128,7 @@ async function requestApproval(sock, originalMsg, mediaType, caption) {
   
   if (mediaBuffer) {
     // Full media download succeeded
-    saveMediaBuffer(id, mediaBuffer, mediaType);
+    saveMediaBuffer(id, mediaBuffer, mediaType, workspaceId);
     previewBase64 = mediaBuffer.toString("base64");
     logger.info({ id, mediaType, size: mediaBuffer.length }, "✅ Media saved successfully (full download)");
   } else {
@@ -137,7 +138,7 @@ async function requestApproval(sock, originalMsg, mediaType, caption) {
     
     if (thumbnailBuffer && thumbnailBuffer.length > 0) {
       // Save thumbnail as preview
-      saveMediaBuffer(id, thumbnailBuffer, "image"); // Store as image since it's JPEG
+      saveMediaBuffer(id, thumbnailBuffer, "image", workspaceId); // Store as image since it's JPEG
       previewBase64 = thumbnailBuffer.toString("base64");
       logger.info({ id, size: thumbnailBuffer.length }, "✅ Thumbnail extracted and saved as fallback preview");
     } else {
@@ -156,14 +157,14 @@ async function requestApproval(sock, originalMsg, mediaType, caption) {
 
   // Emit to dashboard with group name
   logger.info({ id, hasPreview: !!previewBase64 }, "✅ Emitting approval:new event to dashboard");
-  bus.emit("approval:new", { id, mediaType, caption: description, previewBase64, createdAt: Date.now(), sourceGroupName });
+  bus.emit("approval:new", { workspaceId, id, mediaType, caption: description, previewBase64, createdAt: Date.now(), sourceGroupName });
 
   // Auto-expire after APPROVAL_TIMEOUT_MINUTES if nobody responds.
   const handle = setTimeout(async () => {
-    const p = getPending(id);
+    const p = getPending(id, workspaceId);
     if (p && p.status === "pending") {
-      deletePending(id);
-      bus.emit("approval:expired", { id });
+      deletePending(id, workspaceId);
+      bus.emit("approval:expired", { workspaceId, id });
       try {
         await sock.sendMessage(CONTROL_CHAT, { text: ` Request ${id} expired (no response). Discarded.` });
       } catch (e) {
@@ -182,14 +183,15 @@ async function requestApproval(sock, originalMsg, mediaType, caption) {
  * request it refers to, classifies it as yes/no, and either broadcasts or discards.
  */
 async function handleControlReply(sock, text) {
-  const CONTROL_CHAT = getControlChat();
+  const workspaceId = sock.workspaceId;
+  const CONTROL_CHAT = getControlChat(workspaceId);
   const cleaned = (text || "").trim();
   if (!cleaned) return;
 
   const match = cleaned.match(/([a-f0-9]{8})/i);
   let id = match ? match[1].toLowerCase() : null;
 
-  const allPending = readAll();
+  const allPending = readAll(workspaceId);
   if (!id) {
     const pendingIds = Object.keys(allPending).filter((k) => allPending[k].status === "pending");
     if (pendingIds.length === 1) {
@@ -222,17 +224,18 @@ async function handleControlReply(sock, text) {
 }
 
 async function resolveApproval(sock, id, decision, options = {}) {
-  const CONTROL_CHAT = getControlChat();
+  const workspaceId = sock.workspaceId;
+  const CONTROL_CHAT = getControlChat(workspaceId);
   const handle = timeoutHandles.get(id);
   if (handle) {
     clearTimeout(handle);
     timeoutHandles.delete(id);
   }
 
-  const entry = getPending(id);
+  const entry = getPending(id, workspaceId);
   if (!entry) return;
 
-  bus.emit("approval:resolved", { id, decision });
+  bus.emit("approval:resolved", { workspaceId, id, decision });
 
   if (decision === "yes") {
     const groupText = options.customGroups ? `${options.customGroups.length} selected group(s)` : `all target groups`;
@@ -241,10 +244,10 @@ async function resolveApproval(sock, id, decision, options = {}) {
     if (entry.isDashboardUpload) {
       // Dashboard upload: buffer already saved in store, use broadcastRawMedia
       const { getMediaBuffer } = require("./store");
-      const buf = getMediaBuffer(id);
+      const buf = getMediaBuffer(id, workspaceId);
       if (!buf) {
         await sock.sendMessage(CONTROL_CHAT, { text: `❌ Buffer for ${id} not found. Upload may have expired.` });
-        deletePending(id);
+        deletePending(id, workspaceId);
         return;
       }
       ({ sent, failed } = await broadcastRawMedia(sock, buf, entry.mediaType, entry.caption, options));
@@ -260,7 +263,7 @@ async function resolveApproval(sock, id, decision, options = {}) {
     await sock.sendMessage(CONTROL_CHAT, { text: `🚫 Discarded ${id}.` });
   }
 
-  deletePending(id);
+  deletePending(id, workspaceId);
 }
 
 module.exports = { requestApproval, handleControlReply, resolveApproval };

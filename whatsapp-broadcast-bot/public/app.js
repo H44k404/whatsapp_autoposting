@@ -7,10 +7,29 @@ const state = {
   allGroups: [],   // full list from /api/groups/all
   chat: { openJid: null, openName: "", participantCount: 0 },
   status: "disconnected",
+  role: null,
 };
+const titles = { overview: "Overview", approvals: "Approvals", activity: "Activity Feed", groups: "Target Groups", team: "Team" };
 
 /* ── Socket.IO ───────────────────────────────────────────────────── */
 const socket = io();
+
+// Attach the session-bound CSRF token to all state-changing dashboard requests.
+const nativeFetch = window.fetch.bind(window);
+const csrfTokenPromise = nativeFetch("/api/csrf").then((response) => {
+  if (!response.ok) throw new Error("Unable to initialize CSRF protection.");
+  return response.json().then((payload) => payload.token);
+});
+window.fetch = (input, init = {}) => {
+  const url = typeof input === "string" ? input : input.url;
+  const method = (init.method || (typeof input !== "string" && input.method) || "GET").toUpperCase();
+  if (["GET", "HEAD", "OPTIONS"].includes(method) || !url.startsWith("/")) return nativeFetch(input, init);
+  return csrfTokenPromise.then((token) => {
+    const headers = new Headers(init.headers || (typeof input !== "string" ? input.headers : undefined));
+    headers.set("x-csrf-token", token);
+    return nativeFetch(input, { ...init, headers });
+  });
+};
 
 socket.on("init", ({ status, pending, logs, stats, qr }) => {
   setStatus(status, qr);
@@ -89,7 +108,8 @@ socket.on("chat:message", (msg) => {
   updateGroupLiveIndicator(msg.jid, msg.text);
 });
 
-socket.on("system:qr", (url) => {
+socket.on("system:qr", (data) => {
+  const url = typeof data === "string" ? data : data?.url;
   const modal = document.getElementById("qr-modal");
   const img = document.getElementById("qr-image");
   if (modal && img) {
@@ -106,10 +126,12 @@ socket.on("system:connected", () => {
 /* ── Initial data load ───────────────────────────────────────────── */
 async function loadInitialData() {
   try {
-    const [statusRes, groupsRes] = await Promise.all([
+    const [meRes, statusRes, groupsRes] = await Promise.all([
+      fetch("/api/me").then(r => r.json()),
       fetch("/api/status").then(r => r.json()),
       fetch("/api/groups").then(r => r.json()),
     ]);
+    renderAccountProfile(meRes);
     console.log("DEBUG: loadInitialData groupsRes:", groupsRes);
     updateStats({
       sentToday: statusRes.sentToday || 0,
@@ -117,8 +139,17 @@ async function loadInitialData() {
       failed: statusRes.failed || 0,
       targetGroupCount: statusRes.targetGroupCount || 0,
     });
+    if (statusRes.role === "admin") {
+      state.role = "admin";
+      document.querySelectorAll(".admin-only").forEach((el) => { el.style.display = "flex"; });
+      loadTeamUsers();
+    } else {
+      state.role = "worker";
+      document.querySelectorAll(".admin-only").forEach((el) => { el.remove(); });
+    }
     state.groups = groupsRes;
     setStatus(statusRes.status, statusRes.qr);
+      if (statusRes.role === "worker" && statusRes.status !== "connected") connectWorkspace();
       if (statusRes.status === "connected") {
         loadAllGroups(); // Only fetch group details when the bot is connected
       }
@@ -128,6 +159,28 @@ async function loadInitialData() {
   window.scrollTo({ top: 0, behavior: 'smooth' });
   } catch (e) {
     console.error('loadInitialData failed', e);
+  }
+}
+
+function renderAccountProfile(account) {
+  const username = String(account?.username || "Unknown account");
+  const role = account?.role === "admin" ? "Super Admin" : "Worker account";
+  const avatar = document.getElementById("account-avatar");
+  const name = document.getElementById("account-username");
+  const roleLabel = document.getElementById("account-role");
+  if (avatar) avatar.textContent = username.charAt(0).toUpperCase();
+  if (name) name.textContent = username;
+  if (roleLabel) roleLabel.textContent = role;
+}
+
+async function connectWorkspace() {
+  try {
+    const response = await fetch("/api/whatsapp/connect", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    if (!response.ok) throw new Error("Unable to start WhatsApp connection");
+    const status = await fetch("/api/whatsapp/status").then((res) => res.json());
+    setStatus(status.status, status.qr);
+  } catch (error) {
+    showToast("Connection unavailable", error.message, "warn");
   }
 }
 
@@ -176,6 +229,7 @@ function setStatus(status, qr) {
 
 /* Make showSection available globally for inline onclick handlers */
 function showSection(name, navEl) {
+  if (name === "team" && state.role !== "admin") return;
   const content = document.getElementById(`section-${name}`) || document.querySelector(`.content-section[data-section="${name}"]`) || document.querySelector(`[data-section="${name}"]`);
   if (!content) return;
 
@@ -198,6 +252,7 @@ function showSection(name, navEl) {
   // trigger load hooks for some sections
   if (name === 'groups') loadAllGroups();
   if (name === 'approvals') renderApprovals();
+  if (name === 'team') loadTeamUsers();
 
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -230,10 +285,68 @@ document.addEventListener('DOMContentLoaded', () => {
   try { renderMiniApprovals(); } catch (e) { /* noop */ }
   try { updatePendingCount(); } catch (e) { /* noop */ }
   try { updateStatsUI(); } catch (e) { /* noop */ }
+  loadInitialData();
+  const workerForm = document.getElementById("create-worker-form");
+  if (workerForm) workerForm.addEventListener("submit", createWorkerAccount);
 });
 
 // expose to global scope so inline handlers work even if this file is loaded as a module
 window.showSection = showSection;
+
+async function loadTeamUsers() {
+  const list = document.getElementById("team-users-list");
+  if (!list) return;
+  try {
+    const response = await fetch("/api/admin/users");
+    if (!response.ok) throw new Error("Admin access required");
+    const users = await response.json();
+    list.innerHTML = users.map((user) => `<tr style="border-top:1px solid var(--border-light);">
+      <td style="padding:12px 8px;font-weight:600;">${escapeHtml(user.username)}</td>
+      <td style="padding:12px 8px;">${escapeHtml(user.role)}</td>
+      <td style="padding:12px 8px;color:var(--text-muted);">${escapeHtml(user.workspace_name || "—")}</td>
+      <td style="padding:12px 8px;"><span style="color:${user.is_active ? "var(--success)" : "var(--danger)"};">${user.is_active ? "Active" : "Disabled"}</span></td>
+      <td style="padding:12px 8px;">${user.role === "worker" ? `<button class="btn-outline" type="button" onclick="toggleWorker('${user.id}', ${!user.is_active})">${user.is_active ? "Disable" : "Enable"}</button>` : "Super admin"}</td>
+    </tr>`).join("");
+  } catch (error) {
+    list.innerHTML = `<tr><td colspan="5" style="padding:18px 8px;color:var(--danger);">Unable to load team accounts.</td></tr>`;
+  }
+}
+
+async function createWorkerAccount(event) {
+  event.preventDefault();
+  const message = document.getElementById("team-message");
+  const payload = {
+    username: document.getElementById("worker-username").value,
+    password: document.getElementById("worker-password").value,
+    workspaceName: document.getElementById("worker-workspace").value,
+  };
+  try {
+    const response = await fetch("/api/admin/users", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Unable to create worker.");
+    message.textContent = `Worker ${result.username} created.`;
+    message.style.color = "var(--success)";
+    event.target.reset();
+    await loadTeamUsers();
+  } catch (error) {
+    message.textContent = error.message;
+    message.style.color = "var(--danger)";
+  }
+}
+
+async function toggleWorker(id, isActive) {
+  const response = await fetch(`/api/admin/users/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ isActive }) });
+  if (!response.ok) return;
+  await loadTeamUsers();
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
+}
+
+window.loadTeamUsers = loadTeamUsers;
+window.createWorkerAccount = createWorkerAccount;
+window.toggleWorker = toggleWorker;
 
 async function doLogout() {
   showConfirmModal("Log Out", "Are you sure you want to log out of the dashboard?", async () => {

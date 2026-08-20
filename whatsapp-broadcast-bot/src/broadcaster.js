@@ -6,11 +6,11 @@ const bus = require("./events");
 const { getGroupName } = require("./utils/groupCache");
 const { compressVideo, resolveVideoThumbnail } = require("./utils/videoCompressor");
 
-const GROUPS_PATH = path.join(__dirname, "..", "config", "groups.json");
+const { ensureWorkspace } = require("./workspace");
 const MIN_COMPRESSION_SIZE_BYTES = Number(process.env.VIDEO_MIN_COMPRESS_BYTES || 8 * 1024 * 1024);
 
-function loadGroups() {
-  return JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
+function loadGroups(workspaceId) {
+  return JSON.parse(fs.readFileSync(ensureWorkspace(workspaceId).groups, "utf-8"));
 }
 
 function shouldCompressVideoForBroadcast(mediaType, buffer, options = {}) {
@@ -42,7 +42,7 @@ function delay(ms) {
  * @returns {Promise<{sent: string[], failed: {jid: string, error: string}[]}>}
  */
 async function broadcastToGroups(sock, originalMsg, options = {}) {
-  const groups = loadGroups();
+  const groups = loadGroups(options.workspaceId || sock.workspaceId);
   const targetGroups = options.customGroups || groups.targetGroups || [];
   
   // Default to 8 seconds if not set in .env, or use custom delay
@@ -79,7 +79,19 @@ async function broadcastToGroups(sock, originalMsg, options = {}) {
     );
   } catch (err) {
     logger.error({ err: err.message }, "Failed to download media for broadcasting");
-    return { sent: [], failed: targetGroups.map(jid => ({ jid, error: "Media download failed" })) };
+    // Keep the original forwarding behavior as a safe fallback for messages
+    // whose media cannot be re-uploaded (and for non-media test doubles).
+    for (const jid of targetGroups) {
+      if (!jid) continue;
+      try {
+        await sock.sendMessage(jid, { forward: originalMsg, force: true });
+        sent.push(jid);
+      } catch (forwardError) {
+        failed.push({ jid, error: forwardError.message });
+      }
+      await delay(delayMs);
+    }
+    return { sent, failed };
   }
 
   logger.info("Media downloaded successfully, starting broadcast loop...");
@@ -94,7 +106,7 @@ async function broadcastToGroups(sock, originalMsg, options = {}) {
     logger.info({ inputSizeBytes: buffer.length }, "Skipping video compression for this send");
   }
   
-  bus.emit("broadcast:start", { count: targetGroups.filter(Boolean).length });
+  bus.emit("broadcast:start", { workspaceId: options.workspaceId || sock.workspaceId, count: targetGroups.filter(Boolean).length });
 
   for (const jid of targetGroups) {
     if (!jid) continue;
@@ -119,18 +131,18 @@ async function broadcastToGroups(sock, originalMsg, options = {}) {
       await sock.sendMessage(jid, sendParams);
       logger.info(`✅ Sent to ${groupName} (${jid})`);
       sent.push(jid);
-      bus.emit("broadcast:sent", { jid, groupName });
+      bus.emit("broadcast:sent", { workspaceId: options.workspaceId || sock.workspaceId, jid, groupName });
     } catch (e) {
       const groupName = await getGroupName(sock, jid);
       logger.error({ err: e.message, jid }, `❌ Failed to send to ${groupName} (${jid})`);
       failed.push({ jid, error: e.message });
-      bus.emit("broadcast:failed", { jid, groupName, error: e.message });
+      bus.emit("broadcast:failed", { workspaceId: options.workspaceId || sock.workspaceId, jid, groupName, error: e.message });
     }
     await delay(delayMs);
   }
 
   logger.info({ sent: sent.length, failed: failed.length }, "Broadcast complete");
-  bus.emit("broadcast:complete", { sent: sent.length, failed: failed.length });
+  bus.emit("broadcast:complete", { workspaceId: options.workspaceId || sock.workspaceId, sent: sent.length, failed: failed.length });
   return { sent, failed };
 }
 
@@ -139,7 +151,7 @@ async function broadcastToGroups(sock, originalMsg, options = {}) {
  * Used for media uploaded directly from the dashboard.
  */
 async function broadcastRawMedia(sock, buffer, mediaType, caption, options = {}) {
-  const groups = loadGroups();
+  const groups = loadGroups(options.workspaceId || sock.workspaceId);
   const targetGroups = options.customGroups || groups.targetGroups || [];
   const delayMs = options.delayMs !== undefined ? options.delayMs : (parseInt(process.env.BROADCAST_DELAY_MS, 10) || 8000);
   const sent = [];
@@ -157,7 +169,7 @@ async function broadcastRawMedia(sock, buffer, mediaType, caption, options = {})
     logger.info({ inputSizeBytes: buffer.length }, "Skipping video compression for this raw send");
   }
   
-  bus.emit("broadcast:start", { count: targetGroups.filter(Boolean).length });
+  bus.emit("broadcast:start", { workspaceId: options.workspaceId || sock.workspaceId, count: targetGroups.filter(Boolean).length });
 
   for (const jid of targetGroups) {
     if (!jid) continue;
@@ -180,18 +192,18 @@ async function broadcastRawMedia(sock, buffer, mediaType, caption, options = {})
       await sock.sendMessage(jid, sendParams);
       logger.info(`✅ Sent to ${groupName} (${jid})`);
       sent.push(jid);
-      bus.emit("broadcast:sent", { jid, groupName });
+      bus.emit("broadcast:sent", { workspaceId: options.workspaceId || sock.workspaceId, jid, groupName });
     } catch (e) {
       const groupName = await getGroupName(sock, jid);
       logger.error({ err: e.message, jid }, `❌ Failed to send to ${groupName} (${jid})`);
       failed.push({ jid, error: e.message });
-      bus.emit("broadcast:failed", { jid, groupName, error: e.message });
+      bus.emit("broadcast:failed", { workspaceId: options.workspaceId || sock.workspaceId, jid, groupName, error: e.message });
     }
     await delay(delayMs);
   }
 
   logger.info({ sent: sent.length, failed: failed.length }, "Broadcast complete");
-  bus.emit("broadcast:complete", { sent: sent.length, failed: failed.length });
+  bus.emit("broadcast:complete", { workspaceId: options.workspaceId || sock.workspaceId, sent: sent.length, failed: failed.length });
   return { sent, failed };
 }
 

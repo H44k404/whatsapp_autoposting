@@ -1,0 +1,55 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String     @id @db.Uuid
+  username     String     @unique
+  passwordHash String     @map("password_hash")
+  role         String
+  isActive     Boolean    @default(true) @map("is_active")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+  workspace    Workspace?
+  auditLogs    AuditLog[]
+
+  @@map("users")
+}
+
+model Workspace {
+  id          String   @id @db.Uuid
+  ownerUserId String   @unique @map("owner_user_id") @db.Uuid
+  name        String
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  owner       User     @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+
+  @@map("workspaces")
+}
+
+model Session {
+  sid    String   @id
+  sess   Json
+  expire DateTime
+
+  @@index([expire])
+  @@map("session")
+}
+
+model AuditLog {
+  id        BigInt   @id @default(autoincrement())
+  userId    String?  @map("user_id") @db.Uuid
+  action    String
+  ipAddress String?  @map("ip_address") @db.Inet
+  metadata  Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("audit_logs")
+}

@@ -8,31 +8,37 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const session = require("express-session");
+const connectPgSimple = require("connect-pg-simple");
 const helmet = require("helmet");
 const compression = require("compression");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 const bus = require("./events");
 const { readAll, getMediaBuffer } = require("./store");
-const { messageStore } = require("./whatsapp");
+const { getMessageStore, getSocket, startBot } = require("./whatsapp");
+const { ensureWorkspace, ADMIN_WORKSPACE_ID } = require("./workspace");
 const { downloadMediaMessage } = require("baileys");
+const { pool } = require("./db");
+const {
+  createUser,
+  findActiveUser,
+  getWorkspaceForUser,
+  listUsers,
+  recordAudit,
+  setUserActive,
+  verifyPassword,
+} = require("./auth");
 
 const PORT = parseInt(process.env.DASHBOARD_PORT, 10) || 3000;
 const GROUPS_PATH = path.join(__dirname, "..", "config", "groups.json");
 const DASHBOARD_ORIGIN = process.env.DASHBOARD_ORIGIN;
-const AUTH_USERNAME = process.env.DASHBOARD_USERNAME?.trim();
-const AUTH_PASSWORD = process.env.DASHBOARD_PASSWORD?.trim();
 const SESSION_SECRET = (process.env.SESSION_SECRET || "").trim();
 
 if (!SESSION_SECRET) {
   throw new Error("SESSION_SECRET must be set in .env to secure dashboard sessions.");
 }
-if (!AUTH_USERNAME || !AUTH_PASSWORD) {
-  throw new Error("DASHBOARD_USERNAME and DASHBOARD_PASSWORD must be set in .env.");
-}
-if (AUTH_USERNAME === "admin" || AUTH_PASSWORD === "admin123") {
-  throw new Error("Default dashboard credentials are not permitted.");
-}
+const PgSessionStore = connectPgSimple(session);
 
 const ALLOWED_CORS_ORIGINS = DASHBOARD_ORIGIN
   ? DASHBOARD_ORIGIN.split(",").map((origin) => origin.trim()).filter(Boolean)
@@ -67,6 +73,10 @@ function recordLoginAttempt(ip, success) {
   loginAttempts.set(ip, { count, blockedUntil });
 }
 
+function createCsrfToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
 // In-memory activity log (last 200 entries)
 const activityLog = [];
 function addLog(type, data) {
@@ -75,19 +85,22 @@ function addLog(type, data) {
 }
 
 // Stats counters (reset on restart)
-const stats = { sentToday: 0, failed: 0 };
+const workspaceStats = new Map();
+function getStats(workspaceId) {
+  if (!workspaceStats.has(workspaceId)) workspaceStats.set(workspaceId, { sentToday: 0, failed: 0 });
+  return workspaceStats.get(workspaceId);
+}
 
 // Group name cache to avoid spamming the WhatsApp API
 const groupNameCache = new Map();
-let cachedParticipatingGroups = null;
-let groupCacheTime = 0;
+const participatingGroupsCache = new Map();
 
 async function refreshGroupCache(sock) {
   if (!sock) return;
+  const workspaceId = sock.workspaceId || ADMIN_WORKSPACE_ID;
   try {
     const participating = await sock.groupFetchAllParticipating();
-    cachedParticipatingGroups = participating;
-    groupCacheTime = Date.now();
+    participatingGroupsCache.set(workspaceId, { groups: participating, fetchedAt: Date.now() });
   } catch (e) {
     // ignore
   }
@@ -109,13 +122,13 @@ async function getGroupName(sock, jid) {
 }
 
 let _io = null;
-let botStatus = "disconnected";
-let currentQr = null;
+const workspaceQr = new Map();
+const workspaceStatus = new Map();
 
 // Track which group chat the dashboard has open (for real-time forwarding)
 let activeChatJid = null;
 
-function createServer(handleControlReplyFn, getSock) {
+function createServer(handleControlReplyFn, getSock, startWorkspaceFn = null) {
   const app = express();
   const httpServer = http.createServer(app);
   const io = new Server(httpServer, {
@@ -125,6 +138,16 @@ function createServer(handleControlReplyFn, getSock) {
     allowEIO3: true,
   });
   _io = io;
+
+  function workspaceIdForSocket(socket) {
+    return socket.request.session.workspaceId || (socket.request.session.role === "admin" ? ADMIN_WORKSPACE_ID : null);
+  }
+
+  function emitToWorkspace(workspaceId, event, payload) {
+    for (const socket of io.sockets.sockets.values()) {
+      if (workspaceIdForSocket(socket) === workspaceId) socket.emit(event, payload);
+    }
+  }
 
   if (process.env.NODE_ENV === "production") {
     app.set("trust proxy", 1);
@@ -158,14 +181,14 @@ function createServer(handleControlReplyFn, getSock) {
 
   const sessionMiddleware = session({
     secret: SESSION_SECRET,
+    store: new PgSessionStore({ pool, createTableIfMissing: false }),
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      // The server is currently exposed over HTTP; set this to true only
-      // when HTTPS is configured and the app is served securely.
-      secure: false,
+      secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
+      maxAge: 8 * 60 * 60 * 1000,
     },
   });
   app.use(sessionMiddleware);
@@ -173,7 +196,7 @@ function createServer(handleControlReplyFn, getSock) {
   io.use((socket, next) => {
     sessionMiddleware(socket.request, {}, (err) => {
       if (err) return next(err);
-      if (!socket.request.session || !socket.request.session.authenticated) {
+      if (!socket.request.session || !socket.request.session.authenticated || !socket.request.session.userId) {
         return next(new Error("Unauthorized"));
       }
       next();
@@ -182,9 +205,35 @@ function createServer(handleControlReplyFn, getSock) {
 
   // ── Auth middleware ───────────────────────────────────────────────────────
   function requireAuth(req, res, next) {
-    if (req.session && req.session.authenticated) return next();
+    if (req.session?.authenticated && req.session.userId) return next();
     if (req.originalUrl.startsWith("/api/")) return res.status(401).json({ error: "Unauthorized" });
     res.redirect("/login.html");
+  }
+
+  function requireAdmin(req, res, next) {
+    if (req.session?.role === "admin") return next();
+    return res.status(403).json({ error: "Admin access required." });
+  }
+
+  function getWorkspaceId(req) {
+    return req.session.workspaceId || (req.session.role === "admin" ? ADMIN_WORKSPACE_ID : null);
+  }
+
+  function getRequestSock(req) {
+    return getSock(getWorkspaceId(req)) || getSocket(getWorkspaceId(req));
+  }
+
+  function requireCsrf(req, res, next) {
+    if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
+    const supplied = req.get("x-csrf-token");
+    const expected = req.session?.csrfToken;
+    if (!supplied || !expected) return res.status(403).json({ error: "CSRF validation failed." });
+    const suppliedBuffer = Buffer.from(supplied);
+    const expectedBuffer = Buffer.from(expected);
+    if (suppliedBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(suppliedBuffer, expectedBuffer)) {
+      return res.status(403).json({ error: "CSRF validation failed." });
+    }
+    next();
   }
 
   // ── Auth routes (public — no auth required) ───────────────────────────────
@@ -198,18 +247,29 @@ function createServer(handleControlReplyFn, getSock) {
       return res.status(429).json({ error: "Too many login attempts. Try again later." });
     }
 
-    if (username === AUTH_USERNAME && password === AUTH_PASSWORD) {
+    const user = await findActiveUser(username.toLowerCase());
+    if (user && await verifyPassword(user, password)) {
       recordLoginAttempt(clientIp, true);
-      req.session.authenticated = true;
-      req.session.username = username;
-      return res.json({ ok: true });
+      return req.session.regenerate(async (err) => {
+        if (err) return res.status(500).json({ error: "Unable to create session." });
+        req.session.authenticated = true;
+        req.session.userId = user.id;
+        req.session.username = user.username;
+        req.session.role = user.role;
+        const workspace = await getWorkspaceForUser(user.id);
+        req.session.workspaceId = user.role === "admin" ? ADMIN_WORKSPACE_ID : (workspace?.id || null);
+        req.session.csrfToken = createCsrfToken();
+        await recordAudit({ userId: user.id, action: "login", ipAddress: clientIp });
+        return res.json({ ok: true });
+      });
     }
 
     recordLoginAttempt(clientIp, false);
+    await recordAudit({ action: "login_failed", ipAddress: clientIp, metadata: { username: username.slice(0, 64) } });
     return res.status(401).json({ error: "Invalid username or password." });
   });
 
-  app.post("/auth/logout", (req, res) => {
+  app.post("/auth/logout", requireCsrf, (req, res) => {
     req.session.destroy(() => {
       res.json({ ok: true });
     });
@@ -231,19 +291,66 @@ function createServer(handleControlReplyFn, getSock) {
 
   // Protect all API routes
   app.use("/api", requireAuth);
+  app.use("/api", requireCsrf);
+
+  app.get("/api/csrf", (req, res) => {
+    if (!req.session.csrfToken) req.session.csrfToken = createCsrfToken();
+    res.json({ token: req.session.csrfToken });
+  });
+
+  app.get("/api/me", (req, res) => {
+    res.json({ username: req.session.username, role: req.session.role, workspaceId: getWorkspaceId(req) });
+  });
+
+  app.get("/api/admin/users", requireAdmin, async (req, res) => {
+    res.json(await listUsers());
+  });
+
+  app.post("/api/admin/users", requireAdmin, async (req, res) => {
+    try {
+      const { username, password, workspaceName } = req.body || {};
+      const user = await createUser({ username, password, role: "worker", workspaceName });
+      await recordAudit({ userId: req.session.userId, action: "worker_created", metadata: { username: user.username } });
+      res.status(201).json(user);
+    } catch (error) {
+      const duplicate = error.code === "23505";
+      res.status(duplicate ? 409 : 400).json({ error: duplicate ? "Username already exists." : error.message });
+    }
+  });
+
+  app.patch("/api/admin/users/:id", requireAdmin, async (req, res) => {
+    try {
+      const isActive = req.body?.isActive;
+      if (typeof isActive !== "boolean") return res.status(400).json({ error: "isActive must be boolean." });
+      const user = await setUserActive(req.params.id, isActive);
+      if (!user) return res.status(404).json({ error: "User not found." });
+      await recordAudit({ userId: req.session.userId, action: isActive ? "worker_enabled" : "worker_disabled", metadata: { userId: user.id } });
+      res.json(user);
+    } catch (error) {
+      res.status(400).json({ error: "Unable to update user." });
+    }
+  });
 
   // Bot status + stats
   app.get("/api/status", (req, res) => {
-    const all = readAll();
+    const workspaceId = getWorkspaceId(req);
+    if (!workspaceId) return res.status(404).json({ error: "No workspace found" });
+    const stats = getStats(workspaceId);
+
+    const all = readAll(workspaceId);
     const pending = Object.values(all).filter((v) => v.status === "pending").length;
-    const groups = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
+
+    const groups = JSON.parse(fs.readFileSync(ensureWorkspace(workspaceId).groups, "utf-8"));
+    const sock = getRequestSock(req);
     res.json({
-      status: botStatus,
+      status: sock?.user ? "connected" : (workspaceStatus.get(workspaceId) || "disconnected"),
       pending,
       sentToday: stats.sentToday,
       failed: stats.failed,
       targetGroupCount: (groups.targetGroups || []).length,
-      qr: currentQr,
+      qr: null,
+      role: req.session.role,
+      workspace: workspaceId
     });
   });
 
@@ -270,7 +377,7 @@ function createServer(handleControlReplyFn, getSock) {
 
   // All pending approvals (without the raw message object — too large)
   app.get("/api/pending", (req, res) => {
-    const all = readAll();
+    const all = readAll(getWorkspaceId(req));
     const result = Object.entries(all)
       .filter(([, v]) => v.status === "pending")
       .map(([id, v]) => ({
@@ -278,7 +385,7 @@ function createServer(handleControlReplyFn, getSock) {
         mediaType: v.mediaType,
         caption: v.caption,
         createdAt: v.createdAt,
-        hasPreview: !!getMediaBuffer(id),
+        hasPreview: !!getMediaBuffer(id, getWorkspaceId(req)),
         thumbnail: extractThumbnail(v),
       }));
     res.json(result);
@@ -286,8 +393,9 @@ function createServer(handleControlReplyFn, getSock) {
 
   // Serve media preview buffer
   app.get("/api/media/:id", (req, res) => {
-    const buf = getMediaBuffer(req.params.id);
-    const all = readAll();
+    const workspaceId = getWorkspaceId(req);
+    const buf = getMediaBuffer(req.params.id, workspaceId);
+    const all = readAll(workspaceId);
     const entry = all[req.params.id];
     if (!buf) {
       const thumb = entry ? extractThumbnail(entry) : null;
@@ -305,13 +413,13 @@ function createServer(handleControlReplyFn, getSock) {
   // Approve from dashboard
   app.post("/api/approve/:id", async (req, res) => {
     const id = req.params.id;
-    const sock = getSock();
+    const sock = getRequestSock(req);
     if (!sock) return res.status(503).json({ error: "Bot not connected" });
     try {
       const { resolveApproval } = require("./approval");
       const { targetGroups, delayMs } = req.body || {};
       
-      const options = {};
+      const options = { workspaceId: getWorkspaceId(req) };
       if (Array.isArray(targetGroups) && targetGroups.length > 0) {
         options.customGroups = targetGroups;
       }
@@ -329,7 +437,7 @@ function createServer(handleControlReplyFn, getSock) {
   // Reject from dashboard
   app.post("/api/reject/:id", async (req, res) => {
     const id = req.params.id;
-    const sock = getSock();
+    const sock = getRequestSock(req);
     if (!sock) return res.status(503).json({ error: "Bot not connected" });
     try {
       await handleControlReplyFn(sock, `NO ${id}`);
@@ -342,8 +450,9 @@ function createServer(handleControlReplyFn, getSock) {
   // Get groups config with resolved names
   app.get("/api/groups", async (req, res) => {
     try {
-      const groups = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
-      const sock = getSock();
+      const workspaceId = getWorkspaceId(req);
+      const groups = JSON.parse(fs.readFileSync(ensureWorkspace(workspaceId).groups, "utf-8"));
+      const sock = getRequestSock(req);
       
       const resolvedTargetGroups = await Promise.all(
         (groups.targetGroups || []).map(async (jid) => {
@@ -371,12 +480,13 @@ function createServer(handleControlReplyFn, getSock) {
         return res.status(400).json({ error: "targetGroups must be an array" });
       }
       // Read existing to keep mainGroup intact
-      const existing = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
+      const groupsPath = ensureWorkspace(getWorkspaceId(req)).groups;
+      const existing = JSON.parse(fs.readFileSync(groupsPath, "utf-8"));
       existing.targetGroups = data.targetGroups;
-      fs.writeFileSync(GROUPS_PATH, JSON.stringify(existing, null, 2));
+      fs.writeFileSync(groupsPath, JSON.stringify(existing, null, 2));
       
       // Resolve names for the socket emission
-      const sock = getSock();
+      const sock = getRequestSock(req);
       const resolvedTargetGroups = await Promise.all(
         existing.targetGroups.map(async (jid) => ({ jid, name: await getGroupName(sock, jid) }))
       );
@@ -388,7 +498,7 @@ function createServer(handleControlReplyFn, getSock) {
       };
       
       res.json({ ok: true });
-      io.emit("groups:updated", enriched);
+      emitToWorkspace(getWorkspaceId(req), "groups:updated", enriched);
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -404,23 +514,24 @@ function createServer(handleControlReplyFn, getSock) {
       }
 
       // Read existing config
-      const existing = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
+      const groupsPath = ensureWorkspace(getWorkspaceId(req)).groups;
+      const existing = JSON.parse(fs.readFileSync(groupsPath, "utf-8"));
       
       // Update fields if provided
       if (mainGroup) existing.mainGroup = mainGroup;
       if (controlChatJid) existing.controlChatJid = controlChatJid;
       
       // Write updated config
-      fs.writeFileSync(GROUPS_PATH, JSON.stringify(existing, null, 2));
+      fs.writeFileSync(groupsPath, JSON.stringify(existing, null, 2));
       
       // Emit update to connected clients
-      const sock = getSock();
+      const sock = getRequestSock(req);
       if (sock) {
         const mainGroupName = await getGroupName(sock, existing.mainGroup);
         const resolvedTargetGroups = await Promise.all(
           (existing.targetGroups || []).map(async (jid) => ({ jid, name: await getGroupName(sock, jid) }))
         );
-        io.emit("groups:updated", {
+        emitToWorkspace(getWorkspaceId(req), "groups:updated", {
           mainGroup: { jid: existing.mainGroup, name: mainGroupName },
           controlChatJid: existing.controlChatJid,
           targetGroups: resolvedTargetGroups
@@ -440,18 +551,20 @@ function createServer(handleControlReplyFn, getSock) {
 
   // All groups the bot is participating in (for the groups picker)
   app.get("/api/groups/all", async (req, res) => {
-    const sock = getSock();
+    const sock = getRequestSock(req);
     if (!sock) return res.status(503).json({ error: "Bot not connected" });
     try {
       const now = Date.now();
+      const workspaceId = getWorkspaceId(req);
+      const cached = participatingGroupsCache.get(workspaceId);
       // If cache is empty or older than 2 minutes, fetch fresh
-      if (!cachedParticipatingGroups || (now - groupCacheTime > 2 * 60 * 1000)) {
+      if (!cached || (now - cached.fetchedAt > 2 * 60 * 1000)) {
         const participating = await sock.groupFetchAllParticipating();
-        cachedParticipatingGroups = participating;
-        groupCacheTime = now;
+        participatingGroupsCache.set(workspaceId, { groups: participating, fetchedAt: now });
       }
+      const cachedParticipatingGroups = participatingGroupsCache.get(workspaceId)?.groups;
       
-      const config = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
+      const config = JSON.parse(fs.readFileSync(ensureWorkspace(getWorkspaceId(req)).groups, "utf-8"));
       const targetSet = new Set(config.targetGroups || []);
       const groups = Object.values(cachedParticipatingGroups).map((g) => ({
         jid: g.id,
@@ -467,8 +580,9 @@ function createServer(handleControlReplyFn, getSock) {
       });
       res.json(groups);
     } catch (e) {
+      const cachedParticipatingGroups = participatingGroupsCache.get(getWorkspaceId(req))?.groups;
       if (cachedParticipatingGroups) {
-        const config = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
+        const config = JSON.parse(fs.readFileSync(ensureWorkspace(getWorkspaceId(req)).groups, "utf-8"));
         const targetSet = new Set(config.targetGroups || []);
         const groups = Object.values(cachedParticipatingGroups).map((g) => ({
           jid: g.id,
@@ -490,18 +604,18 @@ function createServer(handleControlReplyFn, getSock) {
 
   // Set the active chat JID so the server knows which chat to forward live messages to
   app.post("/api/chat/watch", (req, res) => {
-    activeChatJid = req.body.jid || null;
+    activeChatJid = { workspaceId: getWorkspaceId(req), jid: req.body.jid || null };
     res.json({ ok: true });
   });
 
   // Load recent messages from a group (from in-memory store if available)
   app.get("/api/chat/:jid", async (req, res) => {
-    const sock = getSock();
+    const sock = getRequestSock(req);
     if (!sock) return res.status(503).json({ error: "Bot not connected" });
     const jid = decodeURIComponent(req.params.jid);
     try {
       // Use the shared in-memory store (persisted to disk) — falls back to empty
-      const msgs = (messageStore[jid] || []).slice(-50);
+      const msgs = (getMessageStore(getWorkspaceId(req))[jid] || []).slice(-50);
       const me = sock.user?.id?.split(":")[0] + "@s.whatsapp.net";
       const result = (msgs || []).map((m) => {
         const imageMsg = m.message?.imageMessage;
@@ -535,12 +649,12 @@ function createServer(handleControlReplyFn, getSock) {
 
   // Download & stream media for a specific chat message
   app.get("/api/chat/:jid/media/:msgId", async (req, res) => {
-    const sock = getSock();
+    const sock = getRequestSock(req);
     if (!sock) return res.status(503).json({ error: "Bot not connected" });
     const jid = decodeURIComponent(req.params.jid);
     const msgId = req.params.msgId;
     try {
-      const msgs = (messageStore[jid] || []);
+      const msgs = (getMessageStore(getWorkspaceId(req))[jid] || []);
       const m = msgs.find((msg) => msg.key.id === msgId);
       if (!m || !m.message) return res.status(404).json({ error: "Message not found" });
       const isVideo = !!m.message.videoMessage;
@@ -560,7 +674,7 @@ function createServer(handleControlReplyFn, getSock) {
 
   // Send a message to a group
   app.post("/api/chat/:jid/send", async (req, res) => {
-    const sock = getSock();
+    const sock = getRequestSock(req);
     if (!sock) return res.status(503).json({ error: "Bot not connected" });
     const jid = decodeURIComponent(req.params.jid);
     const { text } = req.body;
@@ -575,14 +689,34 @@ function createServer(handleControlReplyFn, getSock) {
 
   // Reset/Relink session
   app.post("/api/session/reset", (req, res) => {
-    bus.emit("bot:reset_session");
+    bus.emit("bot:reset_session", { workspaceId: getWorkspaceId(req) });
     res.json({ ok: true });
+  });
+
+  app.post("/api/whatsapp/connect", requireAuth, async (req, res) => {
+    const workspaceId = getWorkspaceId(req);
+    if (!workspaceId) return res.status(404).json({ error: "No workspace found" });
+    try {
+      if (startWorkspaceFn) await startWorkspaceFn(workspaceId);
+      else await startBot(workspaceId, () => {});
+      await recordAudit({ userId: req.session.userId, action: "whatsapp_connect_requested", metadata: { workspaceId } });
+      res.json({ ok: true, workspaceId });
+    } catch (error) {
+      res.status(500).json({ error: "Unable to start WhatsApp connection." });
+    }
+  });
+
+  app.get("/api/whatsapp/status", requireAuth, (req, res) => {
+    const workspaceId = getWorkspaceId(req);
+    const sock = getRequestSock(req);
+    res.json({ workspaceId, status: sock?.user ? "connected" : (workspaceStatus.get(workspaceId) || "disconnected"), hasQr: workspaceQr.has(workspaceId), qr: workspaceQr.get(workspaceId) || null });
   });
 
   // ── Socket.IO ─────────────────────────────────────────────────────────────
   io.on("connection", (socket) => {
+    const workspaceId = workspaceIdForSocket(socket);
     // Send current state immediately on connect
-    const all = readAll();
+    const all = readAll(socket.request.session.workspaceId || ADMIN_WORKSPACE_ID);
     const pending = Object.entries(all)
       .filter(([, v]) => v.status === "pending")
       .map(([id, v]) => ({
@@ -590,96 +724,99 @@ function createServer(handleControlReplyFn, getSock) {
         mediaType: v.mediaType,
         caption: v.caption,
         createdAt: v.createdAt,
-        hasPreview: !!getMediaBuffer(id),
+        hasPreview: !!getMediaBuffer(id, socket.request.session.workspaceId || ADMIN_WORKSPACE_ID),
         thumbnail: extractThumbnail(v),
       }));
-    socket.emit("init", { status: botStatus, pending, logs: activityLog.slice(0, 50), stats, qr: currentQr });
+    socket.emit("init", { status: workspaceStatus.get(workspaceId) || "disconnected", pending, logs: activityLog.filter((entry) => entry.data?.workspaceId === workspaceId).slice(0, 50), stats: getStats(workspaceId), qr: workspaceQr.get(workspaceId) || null });
   });
 
   // ── Forward internal bus events → Socket.IO ──────────────────────────────
-  bus.on("bot:connected", () => {
-    botStatus = "connected";
-    currentQr = null;
+  bus.on("bot:connected", ({ workspaceId = ADMIN_WORKSPACE_ID } = {}) => {
+    workspaceStatus.set(workspaceId, "connected");
+    workspaceQr.delete(workspaceId);
     addLog("bot:connected", {});
-    io.emit("bot:connected");
-    io.emit("status:update", { status: "connected", qr: null });
+    emitToWorkspace(workspaceId, "bot:connected", { workspaceId });
+    emitToWorkspace(workspaceId, "status:update", { status: "connected", qr: null, workspaceId });
     // Pre-fetch in background immediately upon connection
-    setTimeout(() => refreshGroupCache(getSock()), 500);
+    setTimeout(() => refreshGroupCache(getSocket(workspaceId)), 500);
   });
 
-  bus.on("bot:disconnected", () => {
-    botStatus = "disconnected";
-    currentQr = null;
+  bus.on("bot:disconnected", ({ workspaceId = ADMIN_WORKSPACE_ID } = {}) => {
+    workspaceStatus.set(workspaceId, "disconnected");
     addLog("bot:disconnected", {});
-    io.emit("bot:disconnected");
-    io.emit("status:update", { status: "disconnected", qr: null });
+    emitToWorkspace(workspaceId, "bot:disconnected", { workspaceId });
+    emitToWorkspace(workspaceId, "status:update", { status: "disconnected", qr: null, workspaceId });
   });
 
-  bus.on("bot:connecting", () => {
-    botStatus = "connecting";
-    currentQr = null;
-    io.emit("status:update", { status: "connecting", qr: null });
+  bus.on("bot:connecting", ({ workspaceId = ADMIN_WORKSPACE_ID } = {}) => {
+    workspaceStatus.set(workspaceId, "connecting");
+    emitToWorkspace(workspaceId, "status:update", { status: "connecting", qr: null, workspaceId });
   });
 
   bus.on("bot:qr", (data) => {
-    currentQr = data.qr;
-    io.emit("status:update", { status: "disconnected", qr: currentQr });
+    const workspaceId = data.workspaceId || ADMIN_WORKSPACE_ID;
+    workspaceStatus.set(workspaceId, "disconnected");
+    workspaceQr.set(workspaceId, data.qr);
+    emitToWorkspace(workspaceId, "status:update", { status: "disconnected", qr: data.qr, workspaceId });
   });
 
   bus.on("approval:new", (data) => {
     addLog("approval:new", data);
     // Get thumbnail from stored pending entry (it's already in the message metadata)
-    const stored = readAll()[data.id];
+    const stored = readAll(data.workspaceId || ADMIN_WORKSPACE_ID)[data.id];
     const thumbnail = stored ? extractThumbnail(stored) : null;
     // Don't forward the full base64 buffer — use thumbnail instead
-    io.emit("approval:new", { ...data, previewBase64: undefined, hasPreview: !!data.previewBase64, thumbnail });
+    emitToWorkspace(data.workspaceId || ADMIN_WORKSPACE_ID, "approval:new", { ...data, previewBase64: undefined, hasPreview: !!data.previewBase64, thumbnail });
   });
 
   bus.on("approval:resolved", (data) => {
     addLog("approval:resolved", data);
-    io.emit("approval:resolved", data);
+    emitToWorkspace(data.workspaceId || ADMIN_WORKSPACE_ID, "approval:resolved", data);
   });
 
   bus.on("approval:expired", (data) => {
     addLog("approval:expired", data);
-    io.emit("approval:expired", data);
+    emitToWorkspace(data.workspaceId || ADMIN_WORKSPACE_ID, "approval:expired", data);
   });
 
   bus.on("broadcast:start", (data) => {
     addLog("broadcast:start", data);
-    io.emit("broadcast:start", data);
+    emitToWorkspace(data.workspaceId || ADMIN_WORKSPACE_ID, "broadcast:start", data);
   });
 
   bus.on("broadcast:sent", (data) => {
+    const stats = getStats(data.workspaceId || ADMIN_WORKSPACE_ID);
     stats.sentToday++;
     addLog("broadcast:sent", data);
-    io.emit("broadcast:sent", data);
-    io.emit("stats:update", { ...stats });
+    emitToWorkspace(data.workspaceId || ADMIN_WORKSPACE_ID, "broadcast:sent", data);
+    emitToWorkspace(data.workspaceId || ADMIN_WORKSPACE_ID, "stats:update", { ...stats });
   });
 
   bus.on("broadcast:failed", (data) => {
+    const stats = getStats(data.workspaceId || ADMIN_WORKSPACE_ID);
     stats.failed++;
     addLog("broadcast:failed", data);
-    io.emit("broadcast:failed", data);
-    io.emit("stats:update", { ...stats });
+    emitToWorkspace(data.workspaceId || ADMIN_WORKSPACE_ID, "broadcast:failed", data);
+    emitToWorkspace(data.workspaceId || ADMIN_WORKSPACE_ID, "stats:update", { ...stats });
   });
 
   bus.on("broadcast:complete", (data) => {
     addLog("broadcast:complete", data);
-    io.emit("broadcast:complete", data);
+    emitToWorkspace(data.workspaceId || ADMIN_WORKSPACE_ID, "broadcast:complete", data);
   });
 
-  bus.on("bot:qr_dataurl", (url) => {
-    io.emit("system:qr", url);
+  bus.on("bot:qr_dataurl", ({ workspaceId = ADMIN_WORKSPACE_ID, url }) => {
+    workspaceQr.set(workspaceId, url);
+    emitToWorkspace(workspaceId, "system:qr", { workspaceId, url });
   });
 
-  bus.on("bot:connected", () => {
-    io.emit("system:connected");
+  bus.on("bot:connected", ({ workspaceId = ADMIN_WORKSPACE_ID } = {}) => {
+    emitToWorkspace(workspaceId, "system:connected", { workspaceId });
   });
 
   // Forward ALL live chat messages to dashboard (frontend filters by group)
   bus.on("chat:message", (data) => {
-    io.emit("chat:message", data);
+    emitToWorkspace(data.workspaceId || ADMIN_WORKSPACE_ID, "chat:message", data);
   });
 
   // ── Watch public/ for file changes and hot-reload connected browsers ──────
@@ -697,7 +834,20 @@ function createServer(handleControlReplyFn, getSock) {
     // fs.watch not available on all platforms — non-fatal
   }
 
+  let resolveReady;
+  let rejectReady;
+  httpServer.ready = new Promise((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+
+  httpServer.on("error", (error) => {
+    rejectReady(error);
+    console.error(`Dashboard server could not start on port ${PORT}: ${error.message}`);
+  });
+
   httpServer.listen(PORT, () => {
+    resolveReady();
     console.log(`\n🖥️  Dashboard running at → http://localhost:${PORT}\n`);
   });
 
