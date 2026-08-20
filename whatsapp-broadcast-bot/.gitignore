@@ -10,7 +10,8 @@ auth/
 .env
 
 # Pending approvals data (runtime state)
-data/pending_approvals.json
+data/*
+!data/.gitkeep
 
 # Logs
 *.log
