@@ -9,22 +9,23 @@
 require("dotenv").config();
 process.env.CONTROL_CHAT_JID = process.env.CONTROL_CHAT_JID || "1234567890@s.whatsapp.net";
 process.env.USE_OLLAMA = "false"; // force regex-only classification for a deterministic test
-process.env.APPROVAL_TIMEOUT_MINUTES = "0.02"; // ~1.2s, for testing the expiry path quickly
+process.env.APPROVAL_TIMEOUT_MINUTES = "0.1"; // ~6s, allowing mocked media retries to finish
 
 const path = require("path");
 const fs = require("fs");
 
-// Point store at a scratch file so we don't clobber real data/pending_approvals.json
-const DATA_DIR = path.join(__dirname, "..", "data");
+// Use an isolated workspace so the test cannot touch real runtime state.
+const DATA_DIR = path.join(__dirname, "..", "data", "workspaces", "dry-run");
 const REAL_FILE = path.join(DATA_DIR, "pending_approvals.json");
 const BACKUP_FILE = path.join(DATA_DIR, "pending_approvals.json.bak-test");
+fs.mkdirSync(DATA_DIR, { recursive: true });
 if (fs.existsSync(REAL_FILE)) fs.copyFileSync(REAL_FILE, BACKUP_FILE);
 fs.writeFileSync(REAL_FILE, "{}");
 
 // Point groups.json at a scratch config
-const GROUPS_PATH = path.join(__dirname, "..", "config", "groups.json");
-const GROUPS_BACKUP = path.join(__dirname, "..", "config", "groups.json.bak-test");
-fs.copyFileSync(GROUPS_PATH, GROUPS_BACKUP);
+const GROUPS_PATH = path.join(DATA_DIR, "groups.json");
+const GROUPS_BACKUP = path.join(DATA_DIR, "groups.json.bak-test");
+if (fs.existsSync(GROUPS_PATH)) fs.copyFileSync(GROUPS_PATH, GROUPS_BACKUP);
 fs.writeFileSync(
   GROUPS_PATH,
   JSON.stringify({ mainGroup: "main@g.us", targetGroups: ["g1@g.us", "g2@g.us", "g3@g.us"] }, null, 2)
@@ -40,13 +41,20 @@ function restore() {
   } else {
     fs.writeFileSync(REAL_FILE, "{}");
   }
-  fs.copyFileSync(GROUPS_BACKUP, GROUPS_PATH);
-  fs.unlinkSync(GROUPS_BACKUP);
+  if (fs.existsSync(GROUPS_BACKUP)) {
+    fs.copyFileSync(GROUPS_BACKUP, GROUPS_PATH);
+    fs.unlinkSync(GROUPS_BACKUP);
+  } else if (fs.existsSync(GROUPS_PATH)) {
+    fs.unlinkSync(GROUPS_PATH);
+  }
+  if (fs.existsSync(REAL_FILE)) fs.unlinkSync(REAL_FILE);
+  if (fs.existsSync(DATA_DIR) && fs.readdirSync(DATA_DIR).length === 0) fs.rmdirSync(DATA_DIR);
 }
 
 function makeMockSock() {
   const sentMessages = [];
   return {
+    workspaceId: "dry-run",
     sentMessages,
     sendMessage: async (jid, content) => {
       sentMessages.push({ jid, content });
@@ -138,8 +146,8 @@ async function testTimeoutExpiry() {
     message: { imageMessage: { caption: "" } },
   };
   const id = await requestApproval(sock, fakeOriginalMsg, "image", "");
-  // Wait longer than APPROVAL_TIMEOUT_MINUTES (~1.2s) for the expiry timer to fire
-  await new Promise((r) => setTimeout(r, 2000));
+  // Wait longer than APPROVAL_TIMEOUT_MINUTES (~6s) for the expiry timer to fire
+  await new Promise((r) => setTimeout(r, 7000));
 
   assert(
     sock.sentMessages.some((m) => m.content.text && m.content.text.includes(`${id} expired`)),
