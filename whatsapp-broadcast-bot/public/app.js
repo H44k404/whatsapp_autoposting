@@ -126,20 +126,43 @@ socket.on("system:connected", () => {
 /* ── Initial data load ───────────────────────────────────────────── */
 async function loadInitialData() {
   try {
+    const fetchJson = async (url) => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      let response;
+      try {
+        response = await fetch(url, { signal: controller.signal });
+      } catch (error) {
+        return { ok: false, data: { error: error.message } };
+      } finally {
+        clearTimeout(timeout);
+      }
+      const text = await response.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (_) {
+        data = { error: `Request failed with status ${response.status}` };
+      }
+      return { ok: response.ok, data };
+    };
     const [meRes, statusRes, groupsRes] = await Promise.all([
-      fetch("/api/me").then(r => r.json()),
-      fetch("/api/status").then(r => r.json()),
-      fetch("/api/groups").then(r => r.json()),
+      fetchJson("/api/me"),
+      fetchJson("/api/status"),
+      fetchJson("/api/groups"),
     ]);
-    renderAccountProfile(meRes);
-    console.log("DEBUG: loadInitialData groupsRes:", groupsRes);
+    if (!meRes.ok || !statusRes.ok) throw new Error("Unable to load account status");
+    renderAccountProfile(meRes.data);
+    const status = statusRes.data;
+    const groups = groupsRes.ok ? groupsRes.data : { mainGroup: null, targetGroups: [] };
+    if (!groupsRes.ok) console.warn("Unable to load group details; account controls remain available.");
     updateStats({
-      sentToday: statusRes.sentToday || 0,
-      pending: statusRes.pending || 0,
-      failed: statusRes.failed || 0,
-      targetGroupCount: statusRes.targetGroupCount || 0,
+      sentToday: status.sentToday || 0,
+      pending: status.pending || 0,
+      failed: status.failed || 0,
+      targetGroupCount: status.targetGroupCount || 0,
     });
-    if (statusRes.role === "admin") {
+    if (status.role === "admin") {
       state.role = "admin";
       document.querySelectorAll(".admin-only").forEach((el) => { el.style.display = "flex"; });
       loadTeamUsers();
@@ -147,10 +170,10 @@ async function loadInitialData() {
       state.role = "worker";
       document.querySelectorAll(".admin-only").forEach((el) => { el.remove(); });
     }
-    state.groups = groupsRes;
-    setStatus(statusRes.status, statusRes.qr);
-      if (statusRes.role === "worker" && statusRes.status !== "connected") connectWorkspace();
-      if (statusRes.status === "connected") {
+    state.groups = groups;
+    setStatus(status.status, status.qr);
+      if (status.role === "worker" && status.status !== "connected") connectWorkspace();
+      if (status.status === "connected") {
         loadAllGroups(); // Only fetch group details when the bot is connected
       }
   const pageTitle = document.getElementById("page-title");
