@@ -1,8 +1,18 @@
 const { v4: uuidv4 } = require("uuid");
 const { downloadMediaMessage } = require("baileys");
-const { savePending, getPending, deletePending, readAll, saveMediaBuffer } = require("./store");
+const {
+  savePending,
+  getPending,
+  deletePending,
+  readAll,
+  saveMediaBuffer,
+  claimSourceMessage,
+  completeSourceMessage,
+  releaseSourceMessage,
+} = require("./store");
 const { classifyReply, describeMedia } = require("./ollama");
 const { broadcastToGroups, broadcastRawMedia, loadGroups, getGroupName } = require("./broadcaster");
+const { extractLinkPreview, restoreMessageBuffers } = require("./utils/linkPreview");
 const logger = require("./utils/logger");
 const bus = require("./events");
 
@@ -81,9 +91,9 @@ function extractThumbnailFromMessage(msg) {
 
 /**
  * Sends an approval-request DM to the control chat and stores the pending entry.
- * Also downloads a media preview for the dashboard and emits approval:new.
+ * Downloads media previews or preserves a WhatsApp link preview for the dashboard.
  */
-async function requestApproval(sock, originalMsg, mediaType, caption) {
+async function createApproval(sock, originalMsg, mediaType, caption) {
   const workspaceId = sock.workspaceId;
   const CONTROL_CHAT = getControlChat(workspaceId);
   
@@ -93,12 +103,14 @@ async function requestApproval(sock, originalMsg, mediaType, caption) {
 
   const id = uuidv4().slice(0, 8);
   let description = caption || "";
+  const linkPreview = mediaType === "link" ? extractLinkPreview(originalMsg) : null;
   
   // Get the source group name for better logging/display
   const sourceGroupJid = originalMsg.key.remoteJid;
   const sourceGroupName = await getGroupName(sock, sourceGroupJid);
+  const approvalChatIsSource = sourceGroupJid === CONTROL_CHAT;
 
-  if (process.env.USE_OLLAMA === "true") {
+  if (mediaType !== "link" && process.env.USE_OLLAMA === "true") {
     try {
       description = await describeMedia(caption);
     } catch (e) {
@@ -108,8 +120,10 @@ async function requestApproval(sock, originalMsg, mediaType, caption) {
 
   savePending(id, {
     mediaMessage: originalMsg,
+    sourceMessageId: originalMsg.key.id,
     mediaType,
     caption: caption || "",
+    linkPreview,
     createdAt: Date.now(),
     status: "pending",
     isDashboardUpload: false,
@@ -117,32 +131,49 @@ async function requestApproval(sock, originalMsg, mediaType, caption) {
     sourceGroupName,
   }, workspaceId);
 
-  // Download media with retry logic
+  // Forward the original message so Facebook video previews stay intact.
   let mediaBuffer = null;
   let thumbnailBuffer = null;
   let previewBase64 = null;
 
-  // Try to download full media first
-  logger.info({ id, mediaType, attempt: 1 }, "Starting media download with retry logic...");
-  mediaBuffer = await downloadMediaWithRetry(originalMsg, sock, 3);
-  
-  if (mediaBuffer) {
-    // Full media download succeeded
-    saveMediaBuffer(id, mediaBuffer, mediaType, workspaceId);
-    previewBase64 = mediaBuffer.toString("base64");
-    logger.info({ id, mediaType, size: mediaBuffer.length }, "✅ Media saved successfully (full download)");
-  } else {
-    // Full media download failed, try to extract thumbnail
-    logger.warn({ id }, "⚠️  Could not download full media, attempting to extract thumbnail from message...");
-    thumbnailBuffer = extractThumbnailFromMessage(originalMsg);
-    
-    if (thumbnailBuffer && thumbnailBuffer.length > 0) {
-      // Save thumbnail as preview
-      saveMediaBuffer(id, thumbnailBuffer, "image", workspaceId); // Store as image since it's JPEG
-      previewBase64 = thumbnailBuffer.toString("base64");
-      logger.info({ id, size: thumbnailBuffer.length }, "✅ Thumbnail extracted and saved as fallback preview");
+  if (mediaType === "link") {
+    if (approvalChatIsSource) {
+      logger.info({ id, sourceGroupJid }, "Link preview is already in the approval chat; skipping duplicate forward");
     } else {
-      logger.error({ id }, "❌ Could not download media or extract thumbnail — dashboard preview will be unavailable");
+      try {
+        await sock.sendMessage(CONTROL_CHAT, {
+          forward: restoreMessageBuffers(originalMsg),
+          force: true,
+        });
+      } catch (e) {
+        deletePending(id, workspaceId);
+        logger.error({ err: e.message, id }, "Failed to forward original link message");
+        throw e;
+      }
+    }
+  } else {
+    // Try to download full media first
+    logger.info({ id, mediaType, attempt: 1 }, "Starting media download with retry logic...");
+    mediaBuffer = await downloadMediaWithRetry(originalMsg, sock, 3);
+
+    if (mediaBuffer) {
+      // Full media download succeeded
+      saveMediaBuffer(id, mediaBuffer, mediaType, workspaceId);
+      previewBase64 = mediaBuffer.toString("base64");
+      logger.info({ id, mediaType, size: mediaBuffer.length }, "✅ Media saved successfully (full download)");
+    } else {
+      // Full media download failed, try to extract thumbnail
+      logger.warn({ id }, "⚠️  Could not download media, attempting to extract thumbnail from message...");
+      thumbnailBuffer = extractThumbnailFromMessage(originalMsg);
+
+      if (thumbnailBuffer && thumbnailBuffer.length > 0) {
+        // Save thumbnail as preview
+        saveMediaBuffer(id, thumbnailBuffer, "image", workspaceId);
+        previewBase64 = thumbnailBuffer.toString("base64");
+        logger.info({ id, size: thumbnailBuffer.length }, "✅ Thumbnail extracted and saved as fallback preview");
+      } else {
+        logger.error({ id }, "❌ Could not download media or extract thumbnail — dashboard preview will be unavailable");
+      }
     }
   }
 
@@ -150,14 +181,18 @@ async function requestApproval(sock, originalMsg, mediaType, caption) {
     text:
       `🆕 New ${mediaType} received from *${sourceGroupName}*.\n` +
       `ID: *${id}*\n` +
-      `${description}\n\n` +
+      (linkPreview?.title ? `Title: ${linkPreview.title}\n` : "") +
+      (linkPreview?.url && !approvalChatIsSource ? `Link: ${linkPreview.url}\n` : "") +
+      (mediaType === "link" && approvalChatIsSource
+        ? "The original link preview is already visible in this group.\n\n"
+        : `${description}\n\n`) +
       `Reply "YES ${id}" or "NO ${id}" to confirm.\n` +
       `(Or just reply YES/NO if this is the only pending item.)`,
   });
 
   // Emit to dashboard with group name
   logger.info({ id, hasPreview: !!previewBase64 }, "✅ Emitting approval:new event to dashboard");
-  bus.emit("approval:new", { workspaceId, id, mediaType, caption: description, previewBase64, createdAt: Date.now(), sourceGroupName });
+  bus.emit("approval:new", { workspaceId, id, mediaType, caption: description, linkPreview, previewBase64, createdAt: Date.now(), sourceGroupName });
 
   // Auto-expire after APPROVAL_TIMEOUT_MINUTES if nobody responds.
   const handle = setTimeout(async () => {
@@ -176,6 +211,24 @@ async function requestApproval(sock, originalMsg, mediaType, caption) {
   timeoutHandles.set(id, handle);
 
   return id;
+}
+
+async function requestApproval(sock, originalMsg, mediaType, caption) {
+  const sourceGroupJid = originalMsg.key.remoteJid;
+  const sourceMessageId = originalMsg.key.id;
+  if (!claimSourceMessage(sourceMessageId, sourceGroupJid, sock.workspaceId)) {
+    logger.info({ sourceGroupJid, sourceMessageId }, "Skipping duplicate source message approval");
+    return null;
+  }
+
+  try {
+    const id = await createApproval(sock, originalMsg, mediaType, caption);
+    completeSourceMessage(sourceMessageId, sourceGroupJid, sock.workspaceId);
+    return id;
+  } catch (e) {
+    releaseSourceMessage(sourceMessageId, sourceGroupJid, sock.workspaceId);
+    throw e;
+  }
 }
 
 /**
@@ -240,6 +293,7 @@ async function resolveApproval(sock, id, decision, options = {}) {
   if (decision === "yes") {
     const groupText = options.customGroups ? `${options.customGroups.length} selected group(s)` : `all target groups`;
     await sock.sendMessage(CONTROL_CHAT, { text: `✅ Broadcasting ${id} to ${groupText}...` });
+    const broadcastOptions = { ...options, broadcastId: uuidv4(), approvalId: id };
     let sent, failed;
     if (entry.isDashboardUpload) {
       // Dashboard upload: buffer already saved in store, use broadcastRawMedia
@@ -250,9 +304,13 @@ async function resolveApproval(sock, id, decision, options = {}) {
         deletePending(id, workspaceId);
         return;
       }
-      ({ sent, failed } = await broadcastRawMedia(sock, buf, entry.mediaType, entry.caption, options));
+      ({ sent, failed } = await broadcastRawMedia(sock, buf, entry.mediaType, entry.caption, broadcastOptions));
     } else {
-      ({ sent, failed } = await broadcastToGroups(sock, entry.mediaMessage, options));
+      ({ sent, failed } = await broadcastToGroups(sock, entry.mediaMessage, {
+        ...broadcastOptions,
+        mediaType: entry.mediaType,
+        caption: entry.caption,
+      }));
     }
     const summary =
       failed.length === 0

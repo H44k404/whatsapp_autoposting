@@ -1,9 +1,53 @@
 const { Pool } = require("pg");
+const { spawn } = require("child_process");
+const { execFileSync } = require("child_process");
+const path = require("path");
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
   throw new Error("DATABASE_URL must be set for the PostgreSQL-backed application.");
 }
+
+function ensureLocalDatabase() {
+  if (process.platform !== "win32" || process.env.NODE_ENV === "production" || !connectionString.includes("127.0.0.1:5433")) return;
+
+  const host = "127.0.0.1";
+  const port = "5433";
+  const dataDir = path.resolve(__dirname, "../../../postgres-data");
+  const pgCtl = "C:\\Program Files\\PostgreSQL\\17\\bin\\pg_ctl.exe";
+  const pgIsReady = "C:\\Program Files\\PostgreSQL\\17\\bin\\pg_isready.exe";
+  const ready = () => {
+    try {
+      execFileSync(pgIsReady, ["-h", host, "-p", port], { stdio: "ignore", timeout: 1000 });
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+
+  if (ready()) return;
+  const child = spawn(pgCtl, [
+    "start",
+    "-D", dataDir,
+    "-o", `-p ${port} -h ${host}`,
+    "-w",
+    "-s",
+  ], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+    creationFlags: 0x08000000,
+  });
+  child.unref();
+
+  const deadline = Date.now() + 15000;
+  while (!ready()) {
+    if (Date.now() >= deadline) throw new Error(`PostgreSQL did not become ready on ${host}:${port}`);
+    execFileSync(process.execPath, ["-e", "setTimeout(() => {}, 250)"], { stdio: "ignore" });
+  }
+}
+
+ensureLocalDatabase();
 
 const pool = new Pool({
   connectionString,

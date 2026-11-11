@@ -61,12 +61,12 @@ ENABLE_VIDEO_COMPRESSION=true
 VIDEO_TARGET_WIDTH=853
 VIDEO_TARGET_HEIGHT=480
 
-# Video quality (CRF: 18-28, higher = smaller file, lower quality)
-# Default 28 is optimized for WhatsApp (~8-10MB)
-VIDEO_CRF=28
+# Starting video quality (higher CRF = smaller file, lower quality)
+# Default 32; if the output is still above half the original size, the bot retries at CRF 36 and 40.
+VIDEO_CRF=32
 
 # Encoding speed (ultrafast, superfast, veryfast, faster, fast, medium, slow, slower)
-# Default: medium (good balance of speed and compression)
+# Default: medium
 VIDEO_PRESET=medium
 
 # Audio bitrate (default: 128k, good for WhatsApp)
@@ -102,7 +102,9 @@ FFPROBE_PATH=/usr/bin/ffprobe
 - **Approval preview**: Uses original media (no compression)
 - **Broadcast delivery**: Uses compressed media (smaller file)
 - **Audio**: Always preserved (AAC codec at 128kbps)
-- **Fallback**: If compression fails, original video is sent
+- **Best-effort size target**: The bot tries up to 50% size reduction by encoding at progressively higher CRF values, while keeping the configured resolution cap.
+- **Quality trade-off**: Higher CRF can make image detail less sharp. If the 50% target is not reached at the configured resolution, the smallest successful encode is used and a warning is logged.
+- **Fallback**: If compression fails or does not make the file smaller, the original video is sent
 
 ---
 
@@ -112,8 +114,10 @@ FFPROBE_PATH=/usr/bin/ffprobe
 ```
 CRF 18 → Best quality, larger file (~15-20MB from 21MB source)
 CRF 23 → High quality, medium file (~10-12MB)
-CRF 28 → Good quality, small file (~8-10MB) ← DEFAULT
-CRF 32 → Lower quality, very small file (~5-7MB)
+CRF 28 → Higher quality, larger file
+CRF 32 → Balanced quality and size ← DEFAULT
+CRF 36 → Lower quality, smaller file
+CRF 40 → Lowest quality retry, smallest file
 ```
 
 ### Preset Values (Encoding Speed)

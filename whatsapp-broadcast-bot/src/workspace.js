@@ -29,7 +29,9 @@ function ensureWorkspace(workspaceId) {
     data: path.join(root, "data"),
     media: path.join(root, "media"),
     pending: path.join(root, "pending_approvals.json"),
+    processedSourceMessages: path.join(root, "processed_source_messages.json"),
     messages: path.join(root, "message-store.json"),
+    broadcastHistory: path.join(root, "broadcast-history.json"),
     groups: path.join(root, "groups.json"),
   };
 
@@ -46,16 +48,32 @@ function ensureWorkspace(workspaceId) {
     else fs.writeFileSync(paths.groups, JSON.stringify({ targetGroups: [] }, null, 2));
   }
 
-  // Preserve the current admin session by copying, never moving, legacy auth/data.
-  if (id === ADMIN_WORKSPACE_ID) {
-    copyDirectoryIfNeeded(LEGACY_AUTH_DIR, paths.auth);
-    if (!fs.existsSync(paths.messages)) copyDirectoryIfNeeded(path.join(LEGACY_DATA_DIR, "message-store.json"), paths.messages);
+  // Never silently restore a stale legacy WhatsApp auth state. The app should use only
+  // the workspace-scoped auth folder, and a reset should happen only when explicitly requested.
+  if (id === ADMIN_WORKSPACE_ID && !fs.existsSync(paths.auth)) {
+    fs.mkdirSync(paths.auth, { recursive: true, mode: 0o700 });
+  }
+
+  if (id === ADMIN_WORKSPACE_ID && !fs.existsSync(paths.messages) && fs.existsSync(path.join(LEGACY_DATA_DIR, "message-store.json"))) {
+    copyDirectoryIfNeeded(path.join(LEGACY_DATA_DIR, "message-store.json"), paths.messages);
   }
   return paths;
+}
+
+function removeWorkspaceData(workspaceId) {
+  const id = safeWorkspaceId(workspaceId);
+  if (id === ADMIN_WORKSPACE_ID) throw new Error("The admin workspace cannot be deleted.");
+
+  const workspaceRoot = path.resolve(WORKSPACES_DIR, id);
+  const workspacesRoot = path.resolve(WORKSPACES_DIR);
+  if (path.dirname(workspaceRoot) !== workspacesRoot) {
+    throw new Error("Workspace path is outside the workspace storage directory.");
+  }
+  if (fs.existsSync(workspaceRoot)) fs.rmSync(workspaceRoot, { recursive: true, force: true });
 }
 
 function workspaceForUser(userId, workspace) {
   return workspace?.id || (userId ? String(userId) : ADMIN_WORKSPACE_ID);
 }
 
-module.exports = { ADMIN_WORKSPACE_ID, WORKSPACES_DIR, safeWorkspaceId, ensureWorkspace, workspaceForUser };
+module.exports = { ADMIN_WORKSPACE_ID, WORKSPACES_DIR, safeWorkspaceId, ensureWorkspace, removeWorkspaceData, workspaceForUser };

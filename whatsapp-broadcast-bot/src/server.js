@@ -16,10 +16,12 @@ const fs = require("fs");
 const crypto = require("crypto");
 const bus = require("./events");
 const { readAll, getMediaBuffer } = require("./store");
-const { getMessageStore, getSocket, startBot } = require("./whatsapp");
-const { ensureWorkspace, ADMIN_WORKSPACE_ID } = require("./workspace");
+const { getBroadcastHistory, deleteBroadcast } = require("./broadcastHistory");
+const { getMessageStore, getSocket, startBot, stopWorkspace } = require("./whatsapp");
+const { ensureWorkspace, removeWorkspaceData, ADMIN_WORKSPACE_ID } = require("./workspace");
 const { downloadMediaMessage } = require("baileys");
 const { pool } = require("./db");
+const logger = require("./utils/logger");
 const {
   createUser,
   findActiveUser,
@@ -27,6 +29,7 @@ const {
   listUsers,
   recordAudit,
   setUserActive,
+  deleteWorkerAccount,
   verifyPassword,
 } = require("./auth");
 
@@ -96,13 +99,14 @@ const groupNameCache = new Map();
 const participatingGroupsCache = new Map();
 
 async function refreshGroupCache(sock) {
-  if (!sock) return;
+  if (!sock) return null;
   const workspaceId = sock.workspaceId || ADMIN_WORKSPACE_ID;
   try {
     const participating = await sock.groupFetchAllParticipating();
     participatingGroupsCache.set(workspaceId, { groups: participating, fetchedAt: Date.now() });
+    return participating;
   } catch (e) {
-    // ignore
+    return null;
   }
 }
 async function getGroupName(sock, jid) {
@@ -146,6 +150,12 @@ function createServer(handleControlReplyFn, getSock, startWorkspaceFn = null) {
   function emitToWorkspace(workspaceId, event, payload) {
     for (const socket of io.sockets.sockets.values()) {
       if (workspaceIdForSocket(socket) === workspaceId) socket.emit(event, payload);
+    }
+  }
+
+  function disconnectWorkspace(workspaceId) {
+    for (const socket of io.sockets.sockets.values()) {
+      if (workspaceIdForSocket(socket) === workspaceId) socket.disconnect(true);
     }
   }
 
@@ -331,6 +341,36 @@ function createServer(handleControlReplyFn, getSock, startWorkspaceFn = null) {
     }
   });
 
+  app.delete("/api/admin/users/:id", requireAdmin, async (req, res) => {
+    const userId = req.params.id;
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId)) {
+      return res.status(400).json({ error: "Invalid team member ID." });
+    }
+    if (userId === req.session.userId) {
+      return res.status(400).json({ error: "You cannot delete your own account." });
+    }
+
+    try {
+      const deletedUser = await deleteWorkerAccount(userId, req.session.userId);
+      if (!deletedUser) return res.status(404).json({ error: "Team member not found." });
+
+      disconnectWorkspace(deletedUser.workspaceId);
+      await stopWorkspace(deletedUser.workspaceId);
+      try {
+        removeWorkspaceData(deletedUser.workspaceId);
+      } catch (error) {
+        logger.error({ err: error.message, userId, workspaceId: deletedUser.workspaceId }, "Worker account was deleted but workspace data cleanup failed");
+        return res.status(500).json({ error: "Account deleted, but workspace data cleanup failed. Contact an administrator." });
+      }
+
+      res.json({ ok: true, username: deletedUser.username });
+    } catch (error) {
+      if (error.code === "NOT_WORKER") return res.status(403).json({ error: error.message });
+      logger.error({ err: error.message, userId }, "Unable to delete team member");
+      res.status(500).json({ error: "Unable to delete team member." });
+    }
+  });
+
   // Bot status + stats
   app.get("/api/status", (req, res) => {
     const workspaceId = getWorkspaceId(req);
@@ -348,7 +388,7 @@ function createServer(handleControlReplyFn, getSock, startWorkspaceFn = null) {
       sentToday: stats.sentToday,
       failed: stats.failed,
       targetGroupCount: (groups.targetGroups || []).length,
-      qr: null,
+      qr: workspaceQr.get(workspaceId) || null,
       role: req.session.role,
       workspace: workspaceId
     });
@@ -368,10 +408,14 @@ function createServer(handleControlReplyFn, getSock, startWorkspaceFn = null) {
 
   function extractThumbnail(v) {
     try {
-      const msg = v.mediaMessage && v.mediaMessage.message;
+      let msg = v.mediaMessage && v.mediaMessage.message;
       if (!msg) return null;
-      const inner = msg.imageMessage || msg.videoMessage || msg.documentMessage || null;
-      return normalizeThumbnail(inner && inner.jpegThumbnail ? inner.jpegThumbnail : null);
+      while (msg.ephemeralMessage?.message || msg.viewOnceMessage?.message) {
+        msg = msg.ephemeralMessage?.message || msg.viewOnceMessage?.message;
+      }
+      const inner = msg.imageMessage || msg.videoMessage || msg.documentMessage || msg.extendedTextMessage || null;
+      const externalPreview = inner?.contextInfo?.externalAdReply;
+      return normalizeThumbnail(inner?.jpegThumbnail || externalPreview?.thumbnail || null);
     } catch (_) { return null; }
   }
 
@@ -384,11 +428,69 @@ function createServer(handleControlReplyFn, getSock, startWorkspaceFn = null) {
         id,
         mediaType: v.mediaType,
         caption: v.caption,
+        linkPreview: v.linkPreview || null,
         createdAt: v.createdAt,
         hasPreview: !!getMediaBuffer(id, getWorkspaceId(req)),
         thumbnail: extractThumbnail(v),
       }));
     res.json(result);
+  });
+
+  app.get("/api/broadcasts", async (req, res) => {
+    try {
+      const sock = getRequestSock(req);
+      const broadcasts = getBroadcastHistory(getWorkspaceId(req));
+      const groupNames = new Map();
+      const result = await Promise.all(broadcasts.map(async (broadcast) => ({
+        ...broadcast,
+        groups: await Promise.all((broadcast.groups || []).map(async (group) => {
+          let name = groupNames.get(group.jid);
+          if (!name) {
+            name = group.name;
+            if (sock) {
+              try {
+                const metadata = await sock.groupMetadata(group.jid);
+                if (metadata?.subject) name = metadata.subject;
+              } catch (error) {
+                logger.debug({ err: error.message, jid: group.jid }, "Could not refresh a broadcast group name");
+              }
+            }
+            if (!name || /@(g\.us|s\.whatsapp\.net)$/.test(name)) name = "Group name unavailable";
+            groupNames.set(group.jid, name);
+          }
+          return {
+            name,
+            status: group.status,
+            isSourceGroup: Boolean(group.isSourceGroup || group.status === "source"),
+          };
+        })),
+      })));
+      res.json(result);
+    } catch (error) {
+      logger.error({ err: error.message, workspaceId: getWorkspaceId(req) }, "Unable to load broadcast history");
+      res.status(500).json({ error: "Unable to load broadcast history." });
+    }
+  });
+
+  app.post("/api/broadcasts/:id/delete", async (req, res) => {
+    const workspaceId = getWorkspaceId(req);
+    const sock = getRequestSock(req);
+    if (!sock) return res.status(503).json({ error: "Bot not connected" });
+    try {
+      const groups = JSON.parse(fs.readFileSync(ensureWorkspace(workspaceId).groups, "utf-8"));
+      const result = await deleteBroadcast(sock, req.params.id, workspaceId, groups.mainGroup);
+      if (!result) return res.status(404).json({ error: "Broadcast not found." });
+      res.json({
+        ok: true,
+        deleted: result.deleted,
+        failed: result.failed,
+        skipped: result.skipped,
+        broadcast: result.broadcast,
+      });
+    } catch (error) {
+      logger.error({ err: error.message, broadcastId: req.params.id, workspaceId }, "Unable to delete broadcast");
+      res.status(500).json({ error: "Unable to delete this broadcast." });
+    }
   });
 
   // Serve media preview buffer
@@ -712,6 +814,15 @@ function createServer(handleControlReplyFn, getSock, startWorkspaceFn = null) {
     res.json({ workspaceId, status: sock?.user ? "connected" : (workspaceStatus.get(workspaceId) || "disconnected"), hasQr: workspaceQr.has(workspaceId), qr: workspaceQr.get(workspaceId) || null });
   });
 
+  app.post("/api/whatsapp/sync", requireAuth, async (req, res) => {
+    const workspaceId = getWorkspaceId(req);
+    const sock = getRequestSock(req);
+    if (!sock?.user) return res.status(503).json({ error: "Bot not connected" });
+    const groups = await refreshGroupCache(sock);
+    if (!groups) return res.status(502).json({ error: "WhatsApp sync failed. Try again shortly." });
+    res.json({ ok: true, workspaceId, groupCount: Object.keys(groups).length, syncedAt: new Date().toISOString() });
+  });
+
   // ── Socket.IO ─────────────────────────────────────────────────────────────
   io.on("connection", (socket) => {
     const workspaceId = workspaceIdForSocket(socket);
@@ -723,6 +834,7 @@ function createServer(handleControlReplyFn, getSock, startWorkspaceFn = null) {
         id,
         mediaType: v.mediaType,
         caption: v.caption,
+        linkPreview: v.linkPreview || null,
         createdAt: v.createdAt,
         hasPreview: !!getMediaBuffer(id, socket.request.session.workspaceId || ADMIN_WORKSPACE_ID),
         thumbnail: extractThumbnail(v),
@@ -746,6 +858,15 @@ function createServer(handleControlReplyFn, getSock, startWorkspaceFn = null) {
     addLog("bot:disconnected", {});
     emitToWorkspace(workspaceId, "bot:disconnected", { workspaceId });
     emitToWorkspace(workspaceId, "status:update", { status: "disconnected", qr: null, workspaceId });
+  });
+
+  bus.on("bot:relink_required", ({ workspaceId = ADMIN_WORKSPACE_ID, reason } = {}) => {
+    workspaceStatus.set(workspaceId, "disconnected");
+    workspaceQr.delete(workspaceId);
+    addLog("bot:disconnected", { workspaceId, reason });
+    emitToWorkspace(workspaceId, "bot:disconnected", { workspaceId, reason });
+    emitToWorkspace(workspaceId, "status:update", { status: "disconnected", qr: null, workspaceId });
+    emitToWorkspace(workspaceId, "bot:relink_required", { workspaceId, reason });
   });
 
   bus.on("bot:connecting", ({ workspaceId = ADMIN_WORKSPACE_ID } = {}) => {
@@ -803,6 +924,10 @@ function createServer(handleControlReplyFn, getSock, startWorkspaceFn = null) {
   bus.on("broadcast:complete", (data) => {
     addLog("broadcast:complete", data);
     emitToWorkspace(data.workspaceId || ADMIN_WORKSPACE_ID, "broadcast:complete", data);
+  });
+
+  bus.on("broadcast:auto_deleted", (data) => {
+    emitToWorkspace(data.workspaceId || ADMIN_WORKSPACE_ID, "broadcast:auto_deleted", data);
   });
 
   bus.on("bot:qr_dataurl", ({ workspaceId = ADMIN_WORKSPACE_ID, url }) => {

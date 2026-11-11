@@ -5,6 +5,9 @@ const logger = require("./utils/logger");
 const bus = require("./events");
 const { getGroupName } = require("./utils/groupCache");
 const { compressVideo, resolveVideoThumbnail } = require("./utils/videoCompressor");
+const { extractLinkPreview, restoreMessageBuffers } = require("./utils/linkPreview");
+const { v4: uuidv4 } = require("uuid");
+const { recordBroadcastMessage } = require("./broadcastHistory");
 
 const { ensureWorkspace } = require("./workspace");
 const MIN_COMPRESSION_SIZE_BYTES = Number(process.env.VIDEO_MIN_COMPRESS_BYTES || 8 * 1024 * 1024);
@@ -32,6 +35,17 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function recordSentMessage(broadcastId, jid, groupName, sentMessage, metadata, workspaceId) {
+  try {
+    recordBroadcastMessage(broadcastId, jid, groupName, sentMessage, metadata, workspaceId);
+  } catch (error) {
+    logger.error(
+      { err: error.message, broadcastId, jid, workspaceId },
+      "Message was sent but its broadcast history could not be saved"
+    );
+  }
+}
+
 /**
  * Downloads the media from the original message and re-uploads it as a fresh
  * message to each target group. This entirely removes the "Forwarded" tag.
@@ -44,11 +58,49 @@ function delay(ms) {
 async function broadcastToGroups(sock, originalMsg, options = {}) {
   const groups = loadGroups(options.workspaceId || sock.workspaceId);
   const targetGroups = options.customGroups || groups.targetGroups || [];
+  const broadcastId = options.broadcastId || uuidv4();
+  const metadata = {
+    mediaType: options.mediaType || (extractLinkPreview(originalMsg) ? "link" : "media"),
+    caption: options.caption || "",
+    approvalId: options.approvalId || null,
+    sourceGroupJid: groups.mainGroup,
+  };
   
   // Default to 8 seconds if not set in .env, or use custom delay
   const delayMs = options.delayMs !== undefined ? options.delayMs : (parseInt(process.env.BROADCAST_DELAY_MS, 10) || 8000);
   const sent = [];
   const failed = [];
+
+  if (extractLinkPreview(originalMsg)) {
+    const forwardedMessage = {
+      forward: restoreMessageBuffers(originalMsg),
+      force: true,
+    };
+    logger.info({ groupCount: targetGroups.filter(Boolean).length }, "Forwarding approved link with its original WhatsApp preview...");
+    bus.emit("broadcast:start", { workspaceId: options.workspaceId || sock.workspaceId, count: targetGroups.filter(Boolean).length });
+
+    for (const jid of targetGroups) {
+      if (!jid) continue;
+      try {
+        const groupName = await getGroupName(sock, jid);
+        const sentMessage = await sock.sendMessage(jid, forwardedMessage);
+        recordSentMessage(broadcastId, jid, groupName, sentMessage, metadata, options.workspaceId || sock.workspaceId);
+        logger.info(`✅ Sent link to ${groupName} (${jid})`);
+        sent.push(jid);
+        bus.emit("broadcast:sent", { workspaceId: options.workspaceId || sock.workspaceId, jid, groupName });
+      } catch (e) {
+        const groupName = await getGroupName(sock, jid);
+        logger.error({ err: e.message, jid }, `❌ Failed to forward link to ${groupName} (${jid})`);
+        failed.push({ jid, error: e.message });
+        bus.emit("broadcast:failed", { workspaceId: options.workspaceId || sock.workspaceId, jid, groupName, error: e.message });
+      }
+      await delay(delayMs);
+    }
+
+    logger.info({ sent: sent.length, failed: failed.length }, "Link broadcast complete");
+    bus.emit("broadcast:complete", { workspaceId: options.workspaceId || sock.workspaceId, sent: sent.length, failed: failed.length });
+    return { sent, failed };
+  }
 
   logger.info({ groupCount: targetGroups.filter(Boolean).length }, "Downloading media for broadcast (no-forward tag)...");
 
@@ -84,7 +136,8 @@ async function broadcastToGroups(sock, originalMsg, options = {}) {
     for (const jid of targetGroups) {
       if (!jid) continue;
       try {
-        await sock.sendMessage(jid, { forward: originalMsg, force: true });
+        const sentMessage = await sock.sendMessage(jid, { forward: originalMsg, force: true });
+        recordSentMessage(broadcastId, jid, await getGroupName(sock, jid), sentMessage, metadata, options.workspaceId || sock.workspaceId);
         sent.push(jid);
       } catch (forwardError) {
         failed.push({ jid, error: forwardError.message });
@@ -128,7 +181,8 @@ async function broadcastToGroups(sock, originalMsg, options = {}) {
         sendParams.mimetype = vmsg.mimetype || "video/mp4";
       }
 
-      await sock.sendMessage(jid, sendParams);
+      const sentMessage = await sock.sendMessage(jid, sendParams);
+      recordSentMessage(broadcastId, jid, groupName, sentMessage, metadata, options.workspaceId || sock.workspaceId);
       logger.info(`✅ Sent to ${groupName} (${jid})`);
       sent.push(jid);
       bus.emit("broadcast:sent", { workspaceId: options.workspaceId || sock.workspaceId, jid, groupName });
@@ -153,6 +207,8 @@ async function broadcastToGroups(sock, originalMsg, options = {}) {
 async function broadcastRawMedia(sock, buffer, mediaType, caption, options = {}) {
   const groups = loadGroups(options.workspaceId || sock.workspaceId);
   const targetGroups = options.customGroups || groups.targetGroups || [];
+  const broadcastId = options.broadcastId || uuidv4();
+  const metadata = { mediaType, caption: caption || "", approvalId: options.approvalId || null, sourceGroupJid: groups.mainGroup };
   const delayMs = options.delayMs !== undefined ? options.delayMs : (parseInt(process.env.BROADCAST_DELAY_MS, 10) || 8000);
   const sent = [];
   const failed = [];
@@ -189,7 +245,8 @@ async function broadcastRawMedia(sock, buffer, mediaType, caption, options = {})
         sendParams.mimetype = options.mimetype || "video/mp4";
       }
 
-      await sock.sendMessage(jid, sendParams);
+      const sentMessage = await sock.sendMessage(jid, sendParams);
+      recordSentMessage(broadcastId, jid, groupName, sentMessage, metadata, options.workspaceId || sock.workspaceId);
       logger.info(`✅ Sent to ${groupName} (${jid})`);
       sent.push(jid);
       bus.emit("broadcast:sent", { workspaceId: options.workspaceId || sock.workspaceId, jid, groupName });

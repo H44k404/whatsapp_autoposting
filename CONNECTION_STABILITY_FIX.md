@@ -31,13 +31,13 @@ async function cleanupSocket(sock) {
 - **Third attempt**: 12 seconds (2x)
 - **Fourth attempt**: 24 seconds (2x)
 - **Fifth attempt**: 48 seconds (2x)
-- **After 5 attempts**: Gives up and requires manual restart
+- **Later attempts**: Delay is capped at 60 seconds; transient failures keep retrying while the process runs
 
 Calculation:
 ```javascript
 const BASE_RECONNECT_DELAY = 3000;
-function getReconnectDelay() {
-  return BASE_RECONNECT_DELAY * Math.pow(2, Math.min(reconnectAttempts, 4));
+function getReconnectDelay(attempt) {
+  return Math.min(BASE_RECONNECT_DELAY * Math.pow(2, attempt - 1), 60000);
 }
 ```
 
@@ -103,20 +103,20 @@ Bot connected
 If persistent issue:
 Reconnecting in 24000ms... (attempt 3)
 Reconnecting in 48000ms... (attempt 4)
-Max reconnection attempts reached - requires manual restart
+Reconnecting in 60000ms... (attempt 6 and later, until the connection returns)
 ```
 
 ## Troubleshooting
 
 ### Status Code 440 (Device Logged Out)
 If you see "statusCode: 440" in the logs:
-1. The device was logged out from WhatsApp Web
-2. Delete the `auth` folder: `rm -r whatsapp-broadcast-bot/auth`
-3. Restart the bot and scan the QR code again
+1. Another WhatsApp Web session replaced this connection.
+2. Keep the saved auth credentials; do not delete the `auth` folder.
+3. Close the other session, reconnect from the dashboard, and scan a QR code if prompted.
 
 ### Status Code 401 (Expired Session)
-1. Delete credentials and rescan: `rm -r whatsapp-broadcast-bot/auth`
-2. Restart the bot
+1. The linked session was logged out or rejected by WhatsApp.
+2. Credentials are kept; reconnect from the dashboard and scan a QR code if prompted.
 
 ### Still Experiencing Issues?
 1. Check that only ONE instance of the bot is running

@@ -70,6 +70,39 @@ async function setUserActive(userId, isActive) {
   return user;
 }
 
+async function deleteWorkerAccount(userId, actorUserId) {
+  return withTransaction(async (client) => {
+    const result = await client.query(
+      `SELECT u.id, u.username, u.role, w.id AS workspace_id
+       FROM users u
+       LEFT JOIN workspaces w ON w.owner_user_id = u.id
+       WHERE u.id = $1
+       FOR UPDATE OF u`,
+      [userId]
+    );
+    const user = result.rows[0];
+    if (!user) return null;
+    if (user.role !== "worker") {
+      const error = new Error("Only worker accounts can be deleted.");
+      error.code = "NOT_WORKER";
+      throw error;
+    }
+
+    await client.query(
+      "INSERT INTO audit_logs (user_id, action, metadata) VALUES ($1, $2, $3)",
+      [actorUserId, "worker_deleted", JSON.stringify({ username: user.username })]
+    );
+    await client.query("DELETE FROM session WHERE sess->>'userId' = $1", [String(user.id)]);
+    await client.query("DELETE FROM users WHERE id = $1", [user.id]);
+
+    return {
+      id: user.id,
+      username: user.username,
+      workspaceId: user.workspace_id || user.id,
+    };
+  });
+}
+
 async function recordAudit({ userId = null, action, ipAddress = null, metadata = {} }) {
   await query(
     "INSERT INTO audit_logs (user_id, action, ip_address, metadata) VALUES ($1, $2, $3, $4)",
@@ -84,5 +117,6 @@ module.exports = {
   listUsers,
   recordAudit,
   setUserActive,
+  deleteWorkerAccount,
   verifyPassword,
 };

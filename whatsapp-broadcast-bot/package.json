@@ -5,8 +5,8 @@
   "main": "src/index.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js",
+    "start": "node scripts/start-local.js",
+    "dev": "node scripts/start-local.js",
     "discover-groups": "node src/discover-groups.js",
     "prod": "cross-env NODE_ENV=production node src/index.js",
     "db:migrate": "node scripts/migrate.js",

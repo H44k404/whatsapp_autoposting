@@ -16,17 +16,17 @@ Your bot was **connecting and disconnecting rapidly** because:
 - Third retry: 12 seconds
 - Fourth retry: 24 seconds
 - Fifth retry: 48 seconds
-- Then gives up (manual restart needed)
+- Then capped at 60 seconds and keeps retrying while the process runs
 
 ### 2. **Proper Cleanup**
 - Old connections are fully destroyed before creating new ones
 - All event listeners are removed (no memory leaks)
-- Single connection managed at a time
+- Message handling is attached to each replacement socket
 
 ### 3. **Better Error Handling**
 - Logs which attempt number and delay time
 - Shows reason for disconnection
-- Stops after 5 failed attempts (prevents infinite loops)
+- Stops only when WhatsApp invalidates or replaces the linked session
 
 ## How to Test
 
@@ -66,8 +66,8 @@ Bot disconnected
 
 | Issue | Solution |
 |-------|----------|
-| Status Code 440 | Device logged out - Delete `auth` folder and rescan QR |
-| Status Code 401 | Session expired - Delete `auth` folder and restart |
+| Status Code 440 | Another WhatsApp session replaced this one - close the other session and reconnect from the dashboard |
+| Status Code 401 | Session logged out/rejected - keep credentials and reconnect from the dashboard; scan a QR code if prompted |
 | Port 3000 in use | Run: `netstat -ano \| findstr :3000` then `taskkill /PID <PID> /F` |
 | Still disconnecting? | Check only ONE bot instance is running |
 

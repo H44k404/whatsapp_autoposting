@@ -17,10 +17,12 @@ process.stdout.write = function (chunk, encoding, callback) {
 };
 // ─────────────────────────────────────────────────────────────────────────
 
-const { startBot, cleanupSocket } = require("./whatsapp");
+const { startBot, cancelReconnect, cleanupSocket } = require("./whatsapp");
 const { requestApproval, handleControlReply } = require("./approval");
 const { createServer } = require("./server");
 const { loadGroups, getGroupName } = require("./broadcaster");
+const { autoDeleteExpiredBroadcasts } = require("./broadcastHistory");
+const { extractLinkPreview, isSelfPostedLink } = require("./utils/linkPreview");
 const logger = require("./utils/logger");
 const bus = require("./events");
 
@@ -33,7 +35,7 @@ function getGroupSettings(workspaceId) {
     if (MAIN_GROUP && CONTROL_CHAT && MAIN_GROUP === CONTROL_CHAT) {
       logger.warn(
         { MAIN_GROUP, CONTROL_CHAT },
-        "MAIN_GROUP and CONTROL_CHAT are the same JID. This is usually a config mistake and will block source-group media approvals."
+        "MAIN_GROUP and CONTROL_CHAT are the same JID. Approval notices will be posted in the source group."
       );
     }
 
@@ -64,28 +66,66 @@ function extractMediaInfo(msg) {
   const hasMedia = !!(imageMsg || videoMsg || isDocumentImage || isDocumentVideo);
   const mediaType = imageMsg || isDocumentImage ? "image" : videoMsg || isDocumentVideo ? "video" : null;
   const caption = imageMsg?.caption || videoMsg?.caption || documentMsg?.caption || raw.extendedTextMessage?.text || raw.conversation || "";
-  return { raw, imageMsg, videoMsg, documentMsg, hasMedia, mediaType, caption };
+  const linkPreview = hasMedia ? null : extractLinkPreview({ message: raw });
+  return { raw, imageMsg, videoMsg, documentMsg, hasMedia, mediaType: mediaType || (linkPreview ? "link" : null), caption, linkPreview };
 }
 
 const fs = require("fs");
 
 // Hold a reference to the active socket so the dashboard API can use it.
 const sockets = new Map();
-const attached = new Set();
+const attached = new WeakSet();
+const broadcastCleanupTimers = new Map();
+const broadcastCleanupRunning = new Set();
 const getSock = (workspaceId) => sockets.get(workspaceId || "admin") || null;
+
+async function cleanExpiredBroadcasts(workspaceId) {
+  if (broadcastCleanupRunning.has(workspaceId)) return;
+  const sock = getSock(workspaceId);
+  if (!sock) return;
+
+  broadcastCleanupRunning.add(workspaceId);
+  try {
+    const groups = loadGroups(workspaceId);
+    const results = await autoDeleteExpiredBroadcasts(sock, workspaceId, groups.mainGroup);
+    const deleted = results.reduce((count, result) => count + result.deleted, 0);
+    const failed = results.reduce((count, result) => count + result.failed, 0);
+    if (deleted || failed) {
+      logger.info({ workspaceId, deleted, failed }, "Automatic cleanup of expired broadcast copies finished");
+    }
+    if (deleted) bus.emit("broadcast:auto_deleted", { workspaceId, deleted, failed });
+  } catch (error) {
+    logger.error({ err: error.message, workspaceId }, "Automatic broadcast-copy cleanup failed");
+  } finally {
+    broadcastCleanupRunning.delete(workspaceId);
+  }
+}
+
+function startBroadcastCleanup(workspaceId) {
+  if (broadcastCleanupTimers.has(workspaceId)) return;
+  const timer = setInterval(() => cleanExpiredBroadcasts(workspaceId), 10 * 60 * 1000);
+  timer.unref();
+  broadcastCleanupTimers.set(workspaceId, timer);
+}
+
+bus.on("bot:connecting", ({ workspaceId = "admin" } = {}) => {
+  sockets.delete(workspaceId);
+});
+bus.on("bot:relink_required", ({ workspaceId = "admin" } = {}) => {
+  sockets.delete(workspaceId);
+});
 
 // Start WhatsApp only after this process has successfully claimed the dashboard port.
 const dashboardServer = createServer(handleControlReply, getSock, connectWorkspace);
 
 function connectWorkspace(workspaceId = "admin") {
-  attached.delete(workspaceId);
-  
   return startBot(workspaceId, async (sock) => {
     sockets.set(workspaceId, sock);
+    startBroadcastCleanup(workspaceId);
+    void cleanExpiredBroadcasts(workspaceId);
 
-    // Only attach message handler once per socket to prevent duplicate listeners
-    if (!attached.has(workspaceId)) {
-      attached.add(workspaceId);
+    if (!attached.has(sock)) {
+      attached.add(sock);
       
       sock.ev.on("messages.upsert", async ({ messages }) => {
         for (const msg of messages) {
@@ -100,6 +140,11 @@ function connectWorkspace(workspaceId = "admin") {
             // into the source group, so source matching must not reject fromMe.
             const isSourceGroup = MAIN_GROUP && from === MAIN_GROUP;
             const isControlChat = CONTROL_CHAT && (from === CONTROL_CHAT || from === `${CONTROL_CHAT.split("@")[0]}@s.whatsapp.net`);
+
+            if (isSourceGroup && mediaType === "link" && isSelfPostedLink(msg, CONTROL_CHAT)) {
+              logger.info({ from, messageId: msg.key.id }, "Ignoring the bot's own link in the source/approval chat");
+              continue;
+            }
 
             // Get group name for logging
             const groupName = await getGroupName(sock, from);
@@ -123,9 +168,10 @@ function connectWorkspace(workspaceId = "admin") {
 
             // Case 1: media posted in the main (source) group
             // Only media in the configured source group creates an approval.
-            if (isSourceGroup && hasMedia && mediaType) {
+            if (isSourceGroup && mediaType && (hasMedia || mediaType === "link")) {
               try {
                 const id = await requestApproval(sock, msg, mediaType, caption);
+                if (!id) continue;
                 logger.info({ id, mediaType, groupName, captionLength: caption?.length }, "✅ Approval request created and sent to control chat");
                 bus.emit("approval:request", { id, mediaType, groupName, from });
               } catch (e) {
@@ -179,8 +225,6 @@ function connectWorkspace(workspaceId = "admin") {
   }).catch((err) => {
     logger.error({ err: err.message, stack: err.stack }, "Failed to start WhatsApp bot");
     sockets.delete(workspaceId);
-    attached.delete(workspaceId);
-    bus.emit("bot:disconnected", { workspaceId });
   });
 }
 
@@ -194,7 +238,7 @@ dashboardServer.ready.then(() => connectWorkspace("admin")).catch((err) => {
 // Listen to reset requests from server
 bus.on("bot:reset_session", async ({ workspaceId = "admin" } = {}) => {
   logger.info({ workspaceId }, "Reset session triggered. Logging out...");
-  attached.delete(workspaceId);
+  cancelReconnect(workspaceId);
   const currentSock = sockets.get(workspaceId);
   
   if (currentSock) {
@@ -215,12 +259,21 @@ bus.on("bot:reset_session", async ({ workspaceId = "admin" } = {}) => {
   await new Promise(resolve => setTimeout(resolve, 1000));
   
   try {
-    fs.rmSync(require("./workspace").ensureWorkspace(workspaceId).auth, { recursive: true, force: true });
-    logger.info("Credentials cleared successfully.");
+    const { ensureWorkspace } = require("./workspace");
+    const workspaceAuth = ensureWorkspace(workspaceId).auth;
+    fs.rmSync(workspaceAuth, { recursive: true, force: true });
+    fs.mkdirSync(workspaceAuth, { recursive: true, mode: 0o700 });
+
+    if (workspaceId === "admin") {
+      const legacyAuth = path.join(__dirname, "..", "auth");
+      fs.rmSync(legacyAuth, { recursive: true, force: true });
+      fs.mkdirSync(legacyAuth, { recursive: true, mode: 0o700 });
+    }
+    logger.info({ workspaceId }, "Credentials cleared successfully.");
   } catch (err) {
-    logger.warn({ err: err.message }, "Auth folder delete failed or did not exist.");
+    logger.warn({ err: err.message, workspaceId }, "Auth folder delete failed or did not exist.");
   }
-  
+
   connectWorkspace(workspaceId);
 });
 

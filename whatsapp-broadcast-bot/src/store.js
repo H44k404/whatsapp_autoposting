@@ -8,9 +8,76 @@ const { ensureWorkspace } = require("./workspace");
 
 // In-memory cache: id → Buffer (write-through to disk)
 const mediaCache = new Map();
+const processedSourceMessageCache = new Map();
+const inFlightSourceMessages = new Map();
+const SOURCE_MESSAGE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_PROCESSED_SOURCE_MESSAGES = 5000;
 
 function paths(workspaceId) {
   return ensureWorkspace(workspaceId);
+}
+
+function getProcessedSourceMessages(workspaceId) {
+  const workspace = paths(workspaceId);
+  if (processedSourceMessageCache.has(workspace.id)) {
+    return processedSourceMessageCache.get(workspace.id);
+  }
+
+  let processed = {};
+  if (fs.existsSync(workspace.processedSourceMessages)) {
+    try {
+      processed = JSON.parse(fs.readFileSync(workspace.processedSourceMessages, "utf-8"));
+    } catch (e) {
+      console.error("processed_source_messages.json is corrupt, ignoring it:", e.message);
+    }
+  }
+  if (!processed || typeof processed !== "object" || Array.isArray(processed)) processed = {};
+  processedSourceMessageCache.set(workspace.id, processed);
+  return processed;
+}
+
+function claimSourceMessage(messageId, sourceJid, workspaceId) {
+  if (!messageId || !sourceJid) return true;
+
+  const workspace = paths(workspaceId);
+  const key = `${sourceJid}:${messageId}`;
+  const processed = getProcessedSourceMessages(workspace.id);
+  let inFlight = inFlightSourceMessages.get(workspace.id);
+  if (!inFlight) {
+    inFlight = new Set();
+    inFlightSourceMessages.set(workspace.id, inFlight);
+  }
+
+  if (processed[key] || inFlight.has(key)) return false;
+  inFlight.add(key);
+  return true;
+}
+
+function completeSourceMessage(messageId, sourceJid, workspaceId) {
+  if (!messageId || !sourceJid) return;
+
+  const workspace = paths(workspaceId);
+  const key = `${sourceJid}:${messageId}`;
+  const processed = getProcessedSourceMessages(workspace.id);
+  const cutoff = Date.now() - SOURCE_MESSAGE_TTL_MS;
+  for (const [processedKey, timestamp] of Object.entries(processed)) {
+    if (typeof timestamp !== "number" || timestamp < cutoff) delete processed[processedKey];
+  }
+
+  processed[key] = Date.now();
+  const entries = Object.entries(processed).sort((a, b) => a[1] - b[1]);
+  for (const [processedKey] of entries.slice(0, Math.max(0, entries.length - MAX_PROCESSED_SOURCE_MESSAGES))) {
+    delete processed[processedKey];
+  }
+
+  fs.writeFileSync(workspace.processedSourceMessages, JSON.stringify(processed));
+  inFlightSourceMessages.get(workspace.id)?.delete(key);
+}
+
+function releaseSourceMessage(messageId, sourceJid, workspaceId) {
+  if (!messageId || !sourceJid) return;
+  const workspaceIdValue = paths(workspaceId).id;
+  inFlightSourceMessages.get(workspaceIdValue)?.delete(`${sourceJid}:${messageId}`);
 }
 
 function readAll(workspaceId) {
@@ -77,4 +144,14 @@ function getMediaBuffer(id, workspaceId) {
   return null;
 }
 
-module.exports = { savePending, getPending, deletePending, readAll, saveMediaBuffer, getMediaBuffer };
+module.exports = {
+  savePending,
+  getPending,
+  deletePending,
+  readAll,
+  saveMediaBuffer,
+  getMediaBuffer,
+  claimSourceMessage,
+  completeSourceMessage,
+  releaseSourceMessage,
+};

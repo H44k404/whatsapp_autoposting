@@ -79,9 +79,9 @@ const FFPROBE_PATH = getStableFfprobePath();
 // Video compression settings (Proton Compressor equivalent)
 const COMPRESSION_CONFIG = {
   enableCompression: process.env.ENABLE_VIDEO_COMPRESSION !== "false", // default: true
-  targetWidth: parseInt(process.env.VIDEO_TARGET_WIDTH || "853"),
-  targetHeight: parseInt(process.env.VIDEO_TARGET_HEIGHT || "480"),
-  videoCRF: parseInt(process.env.VIDEO_CRF || "28"), // Quality: 18-28 (higher = smaller file, lower quality)
+  targetWidth: Math.max(2, Math.floor(parseInt(process.env.VIDEO_TARGET_WIDTH || "853") / 2) * 2),
+  targetHeight: Math.max(2, Math.floor(parseInt(process.env.VIDEO_TARGET_HEIGHT || "480") / 2) * 2),
+  videoCRF: parseInt(process.env.VIDEO_CRF || "32"), // Higher CRF values produce smaller files with lower quality
   videoPreset: process.env.VIDEO_PRESET || "medium", // ultrafast, superfast, veryfast, faster, fast, medium, slow, slower
   audioBitrate: process.env.AUDIO_BITRATE || "128k", // Audio bitrate (128k is good for WhatsApp)
   maxOutputSize: parseInt(process.env.VIDEO_MAX_SIZE_MB || "10") * 1024 * 1024, // Max output size in bytes
@@ -246,52 +246,78 @@ async function compressVideo(inputBuffer, inputFormat = "mp4") {
 
     // Build ffmpeg command for H.264 compression (Proton Compressor equivalent).
     // Some Windows builds ship without libx264, so we use the best available compatible encoder.
-    const ffmpegArgs = [
-      "-i", inputFile,
-      "-c:v", videoEncoder,
-      "-vf", `scale=${COMPRESSION_CONFIG.targetWidth}:${COMPRESSION_CONFIG.targetHeight}`,
-      "-crf", COMPRESSION_CONFIG.videoCRF.toString(),
-      "-c:a", "aac",
-      "-b:a", COMPRESSION_CONFIG.audioBitrate,
-      "-y",
-      outputFile
-    ];
+    const targetReductionPercent = 50;
+    const crfLevels = [...new Set([
+      COMPRESSION_CONFIG.videoCRF,
+      Math.min(COMPRESSION_CONFIG.videoCRF + 4, 51),
+      Math.min(COMPRESSION_CONFIG.videoCRF + 8, 51),
+    ])];
+    let bestOutputBuffer = null;
+    let bestOutputSizeBytes = inputSizeBytes;
+    let attempts = 0;
 
-    if (supportsPreset) {
-      ffmpegArgs.splice(4, 0, "-preset", COMPRESSION_CONFIG.videoPreset);
+    for (const crf of crfLevels) {
+      const ffmpegArgs = [
+        "-i", inputFile,
+        "-c:v", videoEncoder,
+        "-vf", `scale=w='min(iw,${COMPRESSION_CONFIG.targetWidth})':h='min(ih,${COMPRESSION_CONFIG.targetHeight})':force_original_aspect_ratio=decrease:force_divisible_by=2`,
+        "-crf", crf.toString(),
+        "-c:a", "aac",
+        "-b:a", COMPRESSION_CONFIG.audioBitrate,
+        "-y",
+        outputFile
+      ];
+
+      if (supportsPreset) {
+        ffmpegArgs.splice(4, 0, "-preset", COMPRESSION_CONFIG.videoPreset);
+      }
+
+      if (videoEncoder === "mpeg4") {
+        ffmpegArgs.splice(2, 0, "-pix_fmt", "yuv420p");
+      }
+
+      await new Promise((resolve, reject) => {
+        const ffmpeg = spawn(FFMPEG_PATH, ffmpegArgs, {
+          stdio: ["ignore", "pipe", "pipe"]
+        });
+
+        let stderr = "";
+        ffmpeg.stderr.on("data", (data) => {
+          stderr += data.toString();
+        });
+
+        ffmpeg.on("close", (code) => {
+          if (code === 0) {
+            resolve();
+          } else {
+            reject(new Error(`ffmpeg exited with code ${code}: ${stderr.split('\n').slice(-5).join(' ')}`));
+          }
+        });
+
+        ffmpeg.on("error", reject);
+      });
+
+      attempts += 1;
+      const outputSizeBytes = fs.statSync(outputFile).size;
+      if (outputSizeBytes < bestOutputSizeBytes) {
+        bestOutputBuffer = fs.readFileSync(outputFile);
+        bestOutputSizeBytes = outputSizeBytes;
+      }
+
+      const compressionRatio = (1 - bestOutputSizeBytes / inputSizeBytes) * 100;
+      if (compressionRatio >= targetReductionPercent) break;
     }
 
-    if (videoEncoder === "mpeg4") {
-      ffmpegArgs.splice(2, 0, "-pix_fmt", "yuv420p");
+    if (!bestOutputBuffer) {
+      logger.warn(
+        { inputSize: `${inputSizeMB}MB`, attempts },
+        "Compressed output is not smaller — using original video"
+      );
+      return inputBuffer;
     }
 
-    // Run ffmpeg compression
-    await new Promise((resolve, reject) => {
-      const ffmpeg = spawn(FFMPEG_PATH, ffmpegArgs, { 
-        stdio: ["ignore", "pipe", "pipe"] // Suppress console output
-      });
-
-      let stderr = "";
-      ffmpeg.stderr.on("data", (data) => {
-        stderr += data.toString();
-      });
-
-      ffmpeg.on("close", (code) => {
-        if (code === 0) {
-          resolve();
-        } else {
-          reject(new Error(`ffmpeg exited with code ${code}: ${stderr.split('\n').slice(-5).join(' ')}`));
-        }
-      });
-
-      ffmpeg.on("error", (err) => {
-        reject(err);
-      });
-    });
-
-    // Read compressed output buffer
-    const outputBuffer = fs.readFileSync(outputFile);
-    const outputSizeBytes = fs.statSync(outputFile).size;
+    const outputBuffer = bestOutputBuffer;
+    const outputSizeBytes = bestOutputSizeBytes;
     const outputSizeMB = (outputSizeBytes / (1024 * 1024)).toFixed(2);
     const compressionRatio = ((1 - outputSizeBytes / inputSizeBytes) * 100).toFixed(1);
 
@@ -300,12 +326,23 @@ async function compressVideo(inputBuffer, inputFormat = "mp4") {
         inputSize: `${inputSizeMB}MB`, 
         outputSize: `${outputSizeMB}MB`, 
         compressionRatio: `${compressionRatio}%`, 
+        targetReductionPercent,
+        targetReached: Number(compressionRatio) >= targetReductionPercent,
+        attempts,
+        crfLevels: crfLevels.slice(0, attempts),
         codec: "H.264", 
         audio: "AAC", 
         audioPreserved: true 
       },
-      "✅ Video compression completed successfully"
+      "Video compression completed"
     );
+
+    if (Number(compressionRatio) < targetReductionPercent) {
+      logger.warn(
+        { compressionRatio: `${compressionRatio}%`, targetReductionPercent, targetResolution: `${COMPRESSION_CONFIG.targetWidth}x${COMPRESSION_CONFIG.targetHeight}` },
+        "Could not reach the 50% size reduction target without lowering the configured resolution further"
+      );
+    }
 
     return outputBuffer;
   } catch (error) {

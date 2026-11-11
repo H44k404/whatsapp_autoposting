@@ -5,11 +5,13 @@ const state = {
   groups: { mainGroup: "", controlChatJid: null, targetGroups: [] },
   timers: {},      // id → setInterval handle for countdown
   allGroups: [],   // full list from /api/groups/all
+  broadcasts: [],
+  deletingBroadcasts: new Set(),
   chat: { openJid: null, openName: "", participantCount: 0 },
   status: "disconnected",
   role: null,
 };
-const titles = { overview: "Overview", approvals: "Approvals", activity: "Activity Feed", groups: "Target Groups", team: "Team" };
+const titles = { overview: "Overview", approvals: "Approvals", activity: "Activity Feed", broadcasts: "Sent Posts", groups: "Target Groups", team: "Team" };
 
 /* ── Socket.IO ───────────────────────────────────────────────────── */
 const socket = io();
@@ -44,12 +46,177 @@ socket.on("init", ({ status, pending, logs, stats, qr }) => {
   if (stats) updateStats({ ...stats, pending: pending.length });
 });
 
+async function refreshPendingApprovals() {
+  try {
+    const response = await fetch("/api/pending");
+    if (!response.ok) return;
+    const pending = await response.json();
+    const next = {};
+    for (const item of pending) next[item.id] = item;
+    state.approvals = next;
+    renderApprovals();
+    renderMiniApprovals();
+    updatePendingCount();
+  } catch (_) {
+    // Socket events remain the primary path; polling recovers missed events.
+  }
+}
+
+async function refreshBroadcastHistory() {
+  const list = document.getElementById("broadcast-history-list");
+  if (!list) return;
+  const refreshButton = document.querySelector(".broadcast-refresh-button");
+  if (refreshButton) refreshButton.disabled = true;
+  try {
+    const response = await fetch("/api/broadcasts");
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      throw new Error(body?.error || `Unable to load sent posts (HTTP ${response.status}).`);
+    }
+    state.broadcasts = await response.json();
+    renderBroadcastHistory();
+  } catch (error) {
+    list.innerHTML = `<div class="broadcasts-error">
+      <div class="broadcasts-state-icon">!</div>
+      <strong>We couldn't load your sent posts</strong>
+      <span>${escapeHtml(error.message)}</span>
+      <button class="btn-outline" type="button" onclick="refreshBroadcastHistory()">Try again</button>
+    </div>`;
+    console.error("Unable to load broadcast history:", error);
+  } finally {
+    if (refreshButton) refreshButton.disabled = false;
+  }
+}
+
+function renderBroadcastHistory() {
+  const list = document.getElementById("broadcast-history-list");
+  const summary = document.getElementById("broadcasts-summary");
+  if (!list) return;
+  if (summary) {
+    const total = state.broadcasts.length;
+    const available = state.broadcasts.reduce((count, item) => count + (item.groups || []).filter((group) => ["sent", "failed"].includes(group.status) && !group.isSourceGroup).length, 0);
+    summary.innerHTML = `
+      <div class="broadcast-summary-card"><span class="broadcast-summary-icon">▤</span><div><strong>${total}</strong><span>${total === 1 ? "Post sent" : "Posts sent"}</span></div></div>
+      <div class="broadcast-summary-card"><span class="broadcast-summary-icon broadcast-summary-icon-green">✓</span><div><strong>${available}</strong><span>${available === 1 ? "Copy available to remove" : "Copies available to remove"}</span></div></div>`;
+  }
+  if (!state.broadcasts.length) {
+    list.innerHTML = `<div class="broadcasts-empty">
+      <div class="broadcasts-state-icon">↗</div>
+      <strong>No sent posts yet</strong>
+      <span>Approved posts will appear here after they're sent to your broadcast groups.</span>
+    </div>`;
+    return;
+  }
+
+  list.replaceChildren();
+  for (const broadcast of state.broadcasts) {
+    const card = document.createElement("article");
+    card.className = "broadcast-history-card";
+    const groups = (broadcast.groups || []).filter((group) => !group.isSourceGroup);
+    const eligibleGroups = groups.filter((group) => ["sent", "failed"].includes(group.status));
+    const deletedCount = groups.filter((group) => group.status === "deleted").length;
+    const failedCount = groups.filter((group) => ["failed", "untracked"].includes(group.status)).length;
+    const availableCount = groups.filter((group) => group.status === "sent").length;
+    const isDeleting = state.deletingBroadcasts.has(broadcast.id);
+    const postStatus = failedCount ? "Needs attention" : availableCount ? "Ready to remove" : "Removed";
+    const postStatusClass = failedCount ? "attention" : availableCount ? "ready" : "removed";
+    const date = broadcast.createdAt ? new Date(broadcast.createdAt) : null;
+    const createdAt = date && !Number.isNaN(date.getTime())
+      ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date)
+      : "Date unavailable";
+    const mediaType = String(broadcast.mediaType || "post");
+    const iconPath = mediaType === "video"
+      ? "M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"
+      : mediaType === "link"
+        ? "M3.9 12a5 5 0 0 1 5-5h3v2h-3a3 3 0 0 0 0 6h3v2h-3a5 5 0 0 1-5-5zm6.1 1h4v-2h-4v2zm5.1-6h-3V5h3a5 5 0 0 1 0 10h-3v-2h3a3 3 0 0 0 0-6z"
+        : "M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5 11 16.5l3.5-4.5 4.5 6H5l3.5-4.5z";
+    const groupMarkup = groups.length
+      ? groups.map((group) => {
+        const status = group.status === "deleted"
+          ? ["Deleted", "deleted"]
+          : group.status === "failed"
+            ? ["Couldn't delete", "failed"]
+            : group.status === "untracked"
+              ? ["Unavailable", "unavailable"]
+              : ["Available", "available"];
+        return `<div class="broadcast-group-row">
+          <span class="broadcast-group-name"><span class="broadcast-group-dot"></span>${escapeHtml(group.name || "Group name unavailable")}</span>
+          <span class="broadcast-group-status ${status[1]}">${status[0]}</span>
+        </div>`;
+      }).join("")
+      : `<div class="broadcast-groups-empty">No broadcast groups were recorded for this post.</div>`;
+    card.innerHTML = `
+      <div class="broadcast-card-top">
+        <div class="broadcast-card-title">
+          <div class="broadcast-media-icon ${mediaType === "video" ? "video" : mediaType === "link" ? "link" : ""}">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="${iconPath}"/></svg>
+          </div>
+          <div class="broadcast-card-heading">
+            <div class="broadcast-title-line"><h3>${escapeHtml(mediaType.charAt(0).toUpperCase() + mediaType.slice(1))} broadcast</h3><span class="broadcast-state-pill ${postStatusClass}">${postStatus}</span></div>
+            <span class="broadcast-date">${escapeHtml(createdAt)}</span>
+          </div>
+        </div>
+        <button class="broadcast-delete-button" type="button" ${eligibleGroups.length && !isDeleting ? "" : "disabled"}>
+          ${isDeleting ? '<span class="broadcast-button-spinner"></span>Deleting…' : `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>${failedCount ? `Retry ${eligibleGroups.length} group${eligibleGroups.length === 1 ? "" : "s"}` : `Delete from ${eligibleGroups.length} group${eligibleGroups.length === 1 ? "" : "s"}`}`}
+        </button>
+      </div>
+      <p class="broadcast-history-caption">${escapeHtml(broadcast.caption || "No caption was added to this post.")}</p>
+      <div class="broadcast-card-divider"></div>
+      <div class="broadcast-groups-heading"><span>Broadcast groups</span><span>${deletedCount ? `${deletedCount} removed` : `${groups.length} ${groups.length === 1 ? "group" : "groups"}`}</span></div>
+      <div class="broadcast-groups">${groupMarkup}</div>`;
+    const button = card.querySelector("button");
+    if (button && eligibleGroups.length && !isDeleting) {
+      button.addEventListener("click", () => deleteBroadcast(broadcast.id));
+    }
+    list.appendChild(card);
+  }
+}
+
+async function deleteBroadcast(broadcastId) {
+  if (state.deletingBroadcasts.has(broadcastId)) return;
+  const broadcast = state.broadcasts.find((item) => item.id === broadcastId);
+  if (!broadcast) return;
+  const targets = (broadcast.groups || []).filter((group) => ["sent", "failed"].includes(group.status) && !group.isSourceGroup);
+  if (!targets.length) return;
+  const names = targets.map((group) => group.name || "Group name unavailable");
+  showConfirmModal(
+    targets.some((group) => group.status === "failed") ? "Retry removal" : "Remove this post?",
+    `This will remove the post from: ${names.join(", ")}. Your source group will not be changed.`,
+    async () => {
+      state.deletingBroadcasts.add(broadcastId);
+      renderBroadcastHistory();
+      try {
+        const response = await fetch(`/api/broadcasts/${encodeURIComponent(broadcastId)}/delete`, { method: "POST" });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Unable to delete this broadcast.");
+        await refreshBroadcastHistory();
+        showToast(
+          result.failed ? "Some groups need another try" : "Post removed",
+          `Removed from ${result.deleted} ${result.deleted === 1 ? "group" : "groups"}${result.failed ? ` · ${result.failed} couldn't be removed` : ""}`,
+          result.failed ? "warn" : "success"
+        );
+      } catch (error) {
+        showToast("Delete failed", error.message, "error");
+      } finally {
+        state.deletingBroadcasts.delete(broadcastId);
+        renderBroadcastHistory();
+      }
+    },
+    "Delete post"
+  );
+}
+
+setInterval(refreshPendingApprovals, 10000);
+
 socket.on("bot:connected", () => {
   setStatus("connected");
   addActivity("bot:connected", {});
   loadAllGroups(); // Fetch groups now that bot is connected
 });
 socket.on("bot:disconnected", () => { setStatus("disconnected"); addActivity("bot:disconnected", {}); });
+socket.on("bot:relink_required", ({ reason }) => {
+  showToast("WhatsApp needs attention", reason || "Reconnect from the dashboard and follow the QR prompt.", "error");
+});
 socket.on("status:update", ({ status, qr }) => setStatus(status, qr));
 
 socket.on("approval:new", (data) => {
@@ -84,7 +251,11 @@ socket.on("approval:expired", ({ id }) => {
 socket.on("broadcast:start", (d) => addActivity("broadcast:start", d));
 socket.on("broadcast:sent", (d) => { state.stats.sentToday++; updateStatsUI(); addActivity("broadcast:sent", d); });
 socket.on("broadcast:failed", (d) => { state.stats.failed++; updateStatsUI(); addActivity("broadcast:failed", d); });
-socket.on("broadcast:complete", (d) => { addActivity("broadcast:complete", d); showToast("✅ Broadcast Complete", `Sent: ${d.sent} | Failed: ${d.failed}`, d.failed > 0 ? "warn" : "success"); });
+socket.on("broadcast:complete", (d) => { addActivity("broadcast:complete", d); showToast("✅ Broadcast Complete", `Sent: ${d.sent} | Failed: ${d.failed}`, d.failed > 0 ? "warn" : "success"); refreshBroadcastHistory(); });
+socket.on("broadcast:auto_deleted", (d) => {
+  refreshBroadcastHistory();
+  showToast("Old copies removed", `Automatically removed ${d.deleted} ${d.deleted === 1 ? "copy" : "copies"}${d.failed ? ` · ${d.failed} couldn't be removed` : ""}.`, d.failed ? "warn" : "success");
+});
 socket.on("stats:update", (s) => updateStats(s));
 socket.on("groups:updated", (g) => { 
   state.groups = g;
@@ -207,6 +378,18 @@ async function connectWorkspace() {
   }
 }
 
+async function syncWhatsApp() {
+  try {
+    const response = await fetch("/api/whatsapp/sync", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Unable to sync WhatsApp");
+    await loadAllGroups();
+    showToast("WhatsApp synced", `${result.groupCount} groups refreshed.`, "success");
+  } catch (error) {
+    showToast("Sync unavailable", error.message, "warn");
+  }
+}
+
 /* ── Status ──────────────────────────────────────────────────────── */
 function setStatus(status, qr) {
   state.status = status;
@@ -275,6 +458,7 @@ function showSection(name, navEl) {
   // trigger load hooks for some sections
   if (name === 'groups') loadAllGroups();
   if (name === 'approvals') renderApprovals();
+  if (name === 'broadcasts') refreshBroadcastHistory();
   if (name === 'team') loadTeamUsers();
 
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -309,6 +493,8 @@ document.addEventListener('DOMContentLoaded', () => {
   try { updatePendingCount(); } catch (e) { /* noop */ }
   try { updateStatsUI(); } catch (e) { /* noop */ }
   loadInitialData();
+  refreshPendingApprovals();
+  refreshBroadcastHistory();
   const workerForm = document.getElementById("create-worker-form");
   if (workerForm) workerForm.addEventListener("submit", createWorkerAccount);
 });
@@ -328,7 +514,7 @@ async function loadTeamUsers() {
       <td style="padding:12px 8px;">${escapeHtml(user.role)}</td>
       <td style="padding:12px 8px;color:var(--text-muted);">${escapeHtml(user.workspace_name || "—")}</td>
       <td style="padding:12px 8px;"><span style="color:${user.is_active ? "var(--success)" : "var(--danger)"};">${user.is_active ? "Active" : "Disabled"}</span></td>
-      <td style="padding:12px 8px;">${user.role === "worker" ? `<button class="btn-outline" type="button" onclick="toggleWorker('${user.id}', ${!user.is_active})">${user.is_active ? "Disable" : "Enable"}</button>` : "Super admin"}</td>
+      <td style="padding:12px 8px;"><div class="team-row-actions">${user.role === "worker" ? `<button class="btn-outline" type="button" onclick="toggleWorker('${escapeHtml(user.id)}', ${!user.is_active})">${user.is_active ? "Disable" : "Enable"}</button><button class="btn-outline team-delete-button" type="button" onclick="deleteWorker('${escapeHtml(user.id)}', '${escapeHtml(user.username)}')" aria-label="Delete ${escapeHtml(user.username)}">Delete</button>` : `<span class="team-protected-label">Protected</span>`}</div></td>
     </tr>`).join("");
   } catch (error) {
     list.innerHTML = `<tr><td colspan="5" style="padding:18px 8px;color:var(--danger);">Unable to load team accounts.</td></tr>`;
@@ -358,9 +544,34 @@ async function createWorkerAccount(event) {
 }
 
 async function toggleWorker(id, isActive) {
-  const response = await fetch(`/api/admin/users/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ isActive }) });
-  if (!response.ok) return;
-  await loadTeamUsers();
+  try {
+    const response = await fetch(`/api/admin/users/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ isActive }) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Unable to update team member.");
+    showToast(isActive ? "Account enabled" : "Account disabled", `${result.username} can ${isActive ? "now" : "no longer"} access the dashboard.`, "success");
+    await loadTeamUsers();
+  } catch (error) {
+    showToast("Account update failed", error.message, "error");
+  }
+}
+
+function deleteWorker(id, username) {
+  showConfirmModal(
+    "Delete team member?",
+    `Permanently delete ${username}'s account, sign them out, and remove their workspace data? This cannot be undone.`,
+    async () => {
+      try {
+        const response = await fetch(`/api/admin/users/${encodeURIComponent(id)}`, { method: "DELETE" });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Unable to delete team member.");
+        await loadTeamUsers();
+        showToast("Team member deleted", `${result.username}'s account and workspace have been removed.`, "success");
+      } catch (error) {
+        showToast("Delete failed", error.message, "error");
+      }
+    },
+    "Delete account"
+  );
 }
 
 function escapeHtml(value) {
@@ -370,6 +581,9 @@ function escapeHtml(value) {
 window.loadTeamUsers = loadTeamUsers;
 window.createWorkerAccount = createWorkerAccount;
 window.toggleWorker = toggleWorker;
+window.deleteWorker = deleteWorker;
+window.syncWhatsApp = syncWhatsApp;
+window.refreshBroadcastHistory = refreshBroadcastHistory;
 
 async function doLogout() {
   showConfirmModal("Log Out", "Are you sure you want to log out of the dashboard?", async () => {
@@ -394,7 +608,7 @@ async function resetSession() {
 }
 
 /* ── Custom Confirm Modal ────────────────────────────────────────── */
-function showConfirmModal(title, message, onConfirm) {
+function showConfirmModal(title, message, onConfirm, confirmLabel = "OK") {
   let modal = document.getElementById("custom-confirm-modal");
   if (!modal) {
     modal = document.createElement("div");
@@ -421,6 +635,8 @@ function showConfirmModal(title, message, onConfirm) {
 
   const newOkBtn = okBtn.cloneNode(true);
   const newCancelBtn = cancelBtn.cloneNode(true);
+  newOkBtn.textContent = confirmLabel;
+  newOkBtn.classList.toggle("confirm-destructive", confirmLabel.toLowerCase().startsWith("delete"));
   okBtn.parentNode.replaceChild(newOkBtn, okBtn);
   cancelBtn.parentNode.replaceChild(newCancelBtn, cancelBtn);
 
@@ -516,6 +732,39 @@ function buildApprovalCard(item) {
   const noPreviewFallback = `<div id="no-prev-${item.id}" style="width:48px;height:48px;fill:rgba(255,255,255,0.2)">${svgIcon}</div>`;
   const thumbnailSrc = item.thumbnail ? `data:image/jpeg;base64,${item.thumbnail}` : null;
   const previewSrc = item.hasPreview ? `/api/media/${item.id}` : thumbnailSrc || `/api/media/${item.id}`;
+
+  if (item.mediaType === "link") {
+    const linkUrl = item.linkPreview?.url || item.caption || "";
+    const linkTitle = item.linkPreview?.title || linkUrl;
+    const linkDescription = item.linkPreview?.description || "";
+    let linkHost = "";
+    try { linkHost = new URL(linkUrl).hostname; } catch (_) { linkHost = ""; }
+    const linkImage = thumbnailSrc
+      ? `<img src="${thumbnailSrc}" alt="" style="width:100%;max-height:240px;object-fit:cover">`
+      : "";
+    const previewHTML = `<div class="approval-preview" id="preview-wrap-${item.id}" style="display:block;overflow:hidden">
+      ${linkImage}
+      <a href="${escapeHtml(linkUrl)}" target="_blank" rel="noopener noreferrer" style="display:block;padding:12px;color:inherit;text-decoration:none">
+        <strong>${escapeHtml(linkTitle)}</strong>
+        ${linkDescription ? `<div style="margin-top:6px">${escapeHtml(linkDescription)}</div>` : ""}
+        <small style="display:block;margin-top:6px">${escapeHtml(linkHost || linkUrl)}</small>
+      </a>
+      <div class="preview-overlay">link</div>
+    </div>`;
+
+    div.innerHTML = `
+      ${previewHTML}
+      <div class="approval-body">
+        <div class="approval-header"><span class="approval-id">${item.id}</span></div>
+        <div class="approval-caption">${escapeHtml(item.caption || linkUrl)}</div>
+        <div class="approval-timer" id="timer-${item.id}"><span>Calculating...</span></div>
+        <div class="approval-actions">
+          <button class="btn-approve" onclick="doApprove('${item.id}')">Approve</button>
+          <button class="btn-reject" onclick="doReject('${item.id}')">Reject</button>
+        </div>
+      </div>`;
+    return div;
+  }
 
   let mediaTag = `<img src="${previewSrc}" alt=""
     onload="this.classList.remove('img-broken');this.closest('.approval-preview').style.cssText='';var n=document.getElementById('no-prev-${item.id}');if(n)n.remove();"
