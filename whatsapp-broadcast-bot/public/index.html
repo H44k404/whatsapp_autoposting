@@ -326,28 +326,18 @@
       </div>
     </section>
 
-    <!-- SENT BROADCASTS -->
     <section class="content-section" id="section-broadcasts">
       <div class="broadcasts-page">
         <div class="broadcasts-page-heading">
           <div>
-            <div class="broadcasts-eyebrow">BROADCAST LIBRARY</div>
             <h2>Sent posts</h2>
-            <p>Review your broadcasts and remove them from selected broadcast groups.</p>
+            <p>Review tracked broadcasts and remove bot-sent copies. The source group is never changed.</p>
           </div>
-          <button class="btn-outline broadcast-refresh-button" type="button" onclick="refreshBroadcastHistory()">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.93 9h-2.02A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
-            <span>Refresh</span>
-          </button>
+          <button class="btn-outline" type="button" onclick="refreshBroadcastHistory()">Refresh</button>
         </div>
-        <div class="broadcasts-note">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
-          <span>Bot copies are automatically removed after 48 hours, before WhatsApp's usual Delete for Everyone limit. Your source group stays untouched. You can also remove copies earlier.</span>
-        </div>
-        <div class="broadcasts-summary" id="broadcasts-summary" aria-live="polite"></div>
-        <div id="broadcast-history-list" class="broadcast-history-list" aria-live="polite">
-          <div class="broadcasts-loading"><span class="broadcast-spinner"></span><span>Loading your sent posts…</span></div>
-        </div>
+        <div class="broadcasts-note">Bot copies are automatically removed after 48 hours. You can also remove copies earlier.</div>
+        <div class="broadcasts-summary" id="broadcasts-summary"></div>
+        <div id="broadcast-history-list" class="broadcast-history-list" aria-live="polite">Open this page to load sent posts.</div>
       </div>
     </section>
 
@@ -515,7 +505,7 @@
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="app.js?v=20260820-4"></script>
+  <script src="app.js?v=20261119-1"></script>
 </body>
 
 </html>

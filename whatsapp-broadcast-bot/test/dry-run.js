@@ -13,6 +13,7 @@ process.env.APPROVAL_TIMEOUT_MINUTES = "0.1"; // ~6s, allowing mocked media retr
 
 const path = require("path");
 const fs = require("fs");
+const { generateWAMessageContent } = require("baileys");
 
 // Use an isolated workspace so the test cannot touch real runtime state.
 const DATA_DIR = path.join(__dirname, "..", "data", "workspaces", "dry-run");
@@ -43,8 +44,20 @@ fs.writeFileSync(
 );
 process.env.BROADCAST_DELAY_MS = "10"; // speed up the test
 
-const { requestApproval, handleControlReply } = require("../src/approval");
-const { extractLinkPreview, isSelfPostedLink } = require("../src/utils/linkPreview");
+const {
+  requestApproval,
+  handleControlReply,
+  isWhatsAppManagementCommand,
+  isPrivateControlChat,
+  isAuthorizedControlChatSender,
+  parseApprovalCommand,
+} = require("../src/approval");
+const {
+  createLinkPreviewMessage,
+  extractLinkPreview,
+  extractMessageThumbnail,
+  isSelfPostedLink,
+} = require("../src/utils/linkPreview");
 
 function restore() {
   if (fs.existsSync(BACKUP_FILE)) {
@@ -205,6 +218,33 @@ async function testRejectFlow() {
 async function testLinkPreviewFlow() {
   console.log("\n--- Test 3: link preview approval + broadcast ---");
   const sock = makeMockSock();
+  const plainLink = extractLinkPreview({
+    message: { extendedTextMessage: { text: "See https://example.com/post." } },
+  });
+  assert(plainLink?.url === "https://example.com/post", "plain URLs are detected even without preview metadata");
+  assert(
+    extractLinkPreview({ message: { conversation: "https://example.com/plain" } })?.url === "https://example.com/plain",
+    "conversation-message URLs are detected without preview metadata"
+  );
+  const linkThumbnail = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+  const thumbnailMessage = JSON.parse(JSON.stringify({
+    message: {
+      extendedTextMessage: {
+        jpegThumbnail: linkThumbnail,
+      },
+    },
+  }));
+  assert(
+    extractMessageThumbnail(thumbnailMessage)?.equals(linkThumbnail),
+    "link-preview thumbnail is restored from persisted WhatsApp message data"
+  );
+  assert(
+    extractMessageThumbnail({
+      message: { extendedTextMessage: { contextInfo: { externalAdReply: { thumbnail: linkThumbnail } } } },
+    })?.equals(linkThumbnail),
+    "external link-preview thumbnail is detected"
+  );
+
   const fakeOriginalMsg = {
     key: { remoteJid: "main@g.us", id: "LINK123", fromMe: false },
     message: {
@@ -215,11 +255,19 @@ async function testLinkPreviewFlow() {
         title: "Example post",
         description: "A shared post",
         jpegThumbnail: Buffer.from("preview"),
+        thumbnailDirectPath: "/media/thumbnail",
+        mediaKey: Buffer.from("media-key"),
+        mediaKeyTimestamp: 123,
+        thumbnailSha256: Buffer.from("thumbnail-hash"),
+        thumbnailEncSha256: Buffer.from("encrypted-thumbnail-hash"),
+        thumbnailWidth: 1200,
+        thumbnailHeight: 630,
         contextInfo: {
           externalAdReply: {
             title: "Example post",
             mediaType: 2,
             thumbnail: Buffer.from("video preview"),
+            renderLargerThumbnail: true,
           },
         },
       },
@@ -227,6 +275,19 @@ async function testLinkPreviewFlow() {
   };
   const linkPreview = extractLinkPreview(fakeOriginalMsg);
   assert(linkPreview?.title === "Example post", "link title and URL metadata are detected");
+  const generatedLinkMessage = await generateWAMessageContent(
+    createLinkPreviewMessage(fakeOriginalMsg),
+    {}
+  );
+  assert(
+    generatedLinkMessage.extendedTextMessage.thumbnailDirectPath === "/media/thumbnail" &&
+      generatedLinkMessage.extendedTextMessage.thumbnailWidth === 1200 &&
+      generatedLinkMessage.extendedTextMessage.jpegThumbnail.equals(
+        fakeOriginalMsg.message.extendedTextMessage.jpegThumbnail
+      ) &&
+      generatedLinkMessage.extendedTextMessage.contextInfo.externalAdReply.renderLargerThumbnail,
+    "Baileys receives the larger preview metadata and both thumbnail sizes"
+  );
   assert(
     isSelfPostedLink({ ...fakeOriginalMsg, key: { ...fakeOriginalMsg.key, fromMe: true } }, "main@g.us"),
     "bot-authored links in the source/approval chat are recognized as self echoes"
@@ -241,15 +302,18 @@ async function testLinkPreviewFlow() {
   assert(duplicateId === null, "repeated delivery of the same WhatsApp message does not create another approval");
   await handleControlReply(sock, `YES ${id}`);
 
-  const forwardedMessages = sock.sentMessages.filter((m) => m.content.forward);
-  assert(forwardedMessages.length === 4, "the original link message is forwarded to the control chat and all 3 target groups");
+  const linkMessages = sock.sentMessages.filter((m) => m.content.linkPreview);
+  assert(linkMessages.length === 4, "fresh link messages are sent to the control chat and all 3 target groups");
   assert(
-    forwardedMessages.every((m) =>
-      m.content.force &&
-      JSON.stringify(m.content.forward, (key, value) => Buffer.isBuffer(value) ? value.toString("base64") : value) ===
-        JSON.stringify(fakeOriginalMsg, (key, value) => Buffer.isBuffer(value) ? value.toString("base64") : value)
+    linkMessages.every((m) =>
+      !m.content.forward &&
+      m.content.text === fakeOriginalMsg.message.extendedTextMessage.text &&
+      m.content.linkPreview.title === "Example post" &&
+      m.content.linkPreview.jpegThumbnail.equals(fakeOriginalMsg.message.extendedTextMessage.jpegThumbnail) &&
+      m.content.linkPreview.highQualityThumbnail.directPath === "/media/thumbnail" &&
+      m.content.linkPreview.highQualityThumbnail.mediaKey.equals(Buffer.from("media-key"))
     ),
-    "forwarded messages preserve the original Facebook video preview metadata and thumbnails"
+    "fresh link messages preserve preview metadata and thumbnails without a forwarded tag"
   );
   assert(
     sock.sentMessages.some((m) => m.content.text?.includes("New link received") && m.content.text.includes("Example post")),
@@ -289,11 +353,11 @@ async function testLinkPreviewWhenSourceIsControlChat() {
   );
 
   await handleControlReply(sock, `YES ${id}`);
-  const broadcastPreviews = sock.sentMessages.filter((m) => m.content.forward);
+  const broadcastPreviews = sock.sentMessages.filter((m) => m.content.linkPreview);
   assert(
     broadcastPreviews.length === 3 &&
-      broadcastPreviews.every((m) => m.jid !== "main@g.us" && m.content.force),
-    "approval forwards the original link to target groups without looping into the source"
+      broadcastPreviews.every((m) => m.jid !== "main@g.us" && !m.content.forward),
+    "approval sends fresh link previews to target groups without a forwarded tag or source loop"
   );
 }
 
@@ -357,6 +421,114 @@ async function testAmbiguousMultiplePending() {
   await handleControlReply(sock, `NO ${id2}`);
 }
 
+async function testWhatsAppControlCommands() {
+  console.log("\n--- Test 6: WhatsApp control commands ---");
+  assert(isWhatsAppManagementCommand("/help"), "slash-prefixed management commands are recognized for chat authorization");
+  assert(!isWhatsAppManagementCommand("YES a1b2c3d4"), "existing approval replies do not become management commands");
+  assert(
+    isPrivateControlChat("owner@s.whatsapp.net", "owner@s.whatsapp.net") &&
+      !isPrivateControlChat("control@g.us", "control@g.us") &&
+      !isPrivateControlChat("other@s.whatsapp.net", "owner@s.whatsapp.net"),
+    "private control chat authorization matches only the configured direct chat"
+  );
+  assert(
+    isAuthorizedControlChatSender(
+      "control@g.us",
+      "control@g.us",
+      "owner@s.whatsapp.net",
+      "owner@s.whatsapp.net"
+    ) &&
+      !isAuthorizedControlChatSender(
+        "control@g.us",
+        "control@g.us",
+        "other@s.whatsapp.net",
+        "owner@s.whatsapp.net"
+      ) &&
+      isAuthorizedControlChatSender(
+        "control@g.us",
+        "control@g.us",
+        ["owner@lid", "owner@s.whatsapp.net"],
+        "owner@s.whatsapp.net"
+      ) &&
+      !isAuthorizedControlChatSender("control@g.us", "control@g.us", "owner@s.whatsapp.net", ""),
+    "control-group approvals and commands require the configured owner, including its alternate WhatsApp JID"
+  );
+
+  const parsed = parseApprovalCommand(
+    "/approve a1b2c3d4 groups=1,3 compress=off",
+    ["g1@g.us", "g2@g.us", "g3@g.us"]
+  );
+  assert(
+    parsed.id === "a1b2c3d4" &&
+      parsed.options.customGroups.join(",") === "g1@g.us,g3@g.us" &&
+      parsed.options.compressVideo === false &&
+      parsed.options.delayMs === 8000,
+    "approval command selects only requested groups and defaults to an 8-second gap"
+  );
+  assert(
+    !!parseApprovalCommand("/approve a1b2c3d4 groups=1 delay=1", ["g1@g.us"]).error,
+    "approval command rejects delays shorter than 8 seconds"
+  );
+  assert(
+    !!parseApprovalCommand("/approve a1b2c3d4 groups=1 groups=2", ["g1@g.us", "g2@g.us"]).error,
+    "approval command rejects duplicate options"
+  );
+  assert(
+    parseApprovalCommand(
+      "/approve a1b2c3d4 groups=all compress=on delay=300",
+      ["g1@g.us", "g2@g.us"]
+    ).options.compressVideo === true,
+    "approval command supports all groups, forced compression, and the maximum safe delay"
+  );
+
+  const sock = makeMockSock();
+  await handleControlReply(sock, "/groups");
+  assert(
+    sock.sentMessages.some((message) => message.content.text?.includes("1. g1@g.us")),
+    "groups command lists configured destinations with selectable indexes"
+  );
+
+  const original = {
+    key: { remoteJid: "main@g.us", id: "COMMAND-APPROVAL", fromMe: false },
+    message: { imageMessage: { caption: "selected group test" } },
+  };
+  const approvalId = await requestApproval(sock, original, "image", "selected group test");
+  await handleControlReply(sock, `/approve ${approvalId} groups=2 compress=off`);
+
+  const sends = sock.sentMessages.filter((message) => message.content.forward);
+  assert(
+    sends.length === 1 && sends[0].jid === "g2@g.us",
+    "WhatsApp approval command broadcasts only to the explicitly selected group"
+  );
+
+  const { getBroadcastHistory } = require("../src/broadcastHistory");
+  const broadcast = getBroadcastHistory("dry-run").find((item) => item.approvalId === approvalId);
+  assert(!!broadcast, "WhatsApp-triggered broadcast is recorded in the existing sent history");
+
+  await handleControlReply(sock, "/sent");
+  assert(
+    sock.sentMessages.some((message) => message.content.text?.includes(broadcast.id)),
+    "sent command shows the tracked broadcast ID"
+  );
+
+  await handleControlReply(sock, `/delete ${broadcast.id}`);
+  assert(
+    !sock.sentMessages.some((message) => message.content.delete),
+    "delete command asks for confirmation without deleting immediately"
+  );
+  await handleControlReply(sock, `/confirm-delete ${broadcast.id}`);
+  const deletionCalls = sock.sentMessages.filter((message) => message.content.delete);
+  assert(
+    deletionCalls.length === 1 && deletionCalls[0].jid === "g2@g.us",
+    "confirmed deletion removes only the tracked destination copy"
+  );
+  await handleControlReply(sock, `/confirm-delete ${broadcast.id}`);
+  assert(
+    sock.sentMessages.filter((message) => message.content.delete).length === 1,
+    "delete confirmation is single-use"
+  );
+}
+
 (async () => {
   try {
     await testApproveFlow();
@@ -366,6 +538,7 @@ async function testAmbiguousMultiplePending() {
     await testSinglePendingImplicitId();
     await testTimeoutExpiry();
     await testAmbiguousMultiplePending();
+    await testWhatsAppControlCommands();
     console.log("\n🎉 All dry-run tests passed.");
   } catch (e) {
     console.error("\n💥 Test crashed:", e);

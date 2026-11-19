@@ -42,9 +42,7 @@ function persistStore(workspaceId) {
 }
 
 // Save every 30 seconds and on clean exit
-const storePersistenceTimer = setInterval(() => {
-  for (const workspaceId of messageStores.keys()) persistStore(workspaceId);
-}, 30_000);
+const storePersistenceTimer = setInterval(() => { for (const workspaceId of messageStores.keys()) persistStore(workspaceId); }, 30_000);
 storePersistenceTimer.unref();
 process.on("exit", () => { for (const workspaceId of messageStores.keys()) persistStore(workspaceId); });
 process.on("SIGINT", () => { for (const workspaceId of messageStores.keys()) persistStore(workspaceId); process.exit(); });
@@ -86,39 +84,35 @@ function upsertMessages(store, jid, msgs, type) {
 
 // ── Connection state management ──────────────────────────────────────────
 const runtimes = new Map();
+const MAX_RECONNECT_ATTEMPTS = 5;
 const BASE_RECONNECT_DELAY = 3000;
-const MAX_RECONNECT_DELAY = 60_000;
 
-function getReconnectDelay(attempt) {
-  const exponent = Math.min(Math.max(attempt - 1, 0), 5);
-  return Math.min(BASE_RECONNECT_DELAY * Math.pow(2, exponent), MAX_RECONNECT_DELAY);
+function shouldAttemptReconnect(statusCode, isConnectionReplaced, attempts = 0) {
+  return (
+    !isConnectionReplaced &&
+    statusCode !== DisconnectReason.loggedOut &&
+    statusCode !== DisconnectReason.forbidden &&
+    statusCode !== DisconnectReason.connectionReplaced &&
+    attempts < MAX_RECONNECT_ATTEMPTS
+  );
 }
 
-function shouldAttemptReconnect(statusCode, isConnectionReplaced) {
-  if (isConnectionReplaced) return false;
-  if (statusCode === DisconnectReason.loggedOut) return false;
-  if (statusCode === DisconnectReason.connectionReplaced) return false;
-  if (statusCode === DisconnectReason.forbidden) return false;
-  return true;
+function getReconnectDelay(attempt) {
+  return Math.min(BASE_RECONNECT_DELAY * (2 ** Math.max(0, attempt - 1)), 48_000);
 }
 
 function scheduleReconnect(workspaceId, onReady, runtime, generation) {
-  if (runtime.generation !== generation) return;
-
+  if (runtime.generation !== generation || runtime.attempts >= MAX_RECONNECT_ATTEMPTS) return;
   runtime.attempts++;
   const delay = getReconnectDelay(runtime.attempts);
-  logger.info(
-    { attempt: runtime.attempts, delayMs: delay, workspaceId },
-    `Reconnecting in ${delay}ms...`
-  );
+  logger.info({ attempt: runtime.attempts, maxAttempts: MAX_RECONNECT_ATTEMPTS, delayMs: delay, workspaceId }, `Reconnecting in ${delay}ms...`);
   bus.emit("bot:connecting", { workspaceId });
-
   if (runtime.timer) clearTimeout(runtime.timer);
   runtime.timer = setTimeout(() => {
     runtime.timer = null;
     if (runtime.generation !== generation) return;
-    startBot(workspaceId, onReady).catch((err) => {
-      logger.error({ err: err.message, stack: err.stack }, "Failed to reconnect WhatsApp socket; another retry is scheduled");
+    startBot(workspaceId, onReady).catch((error) => {
+      logger.error({ err: error.message, stack: error.stack, workspaceId }, "Failed to reconnect WhatsApp socket");
     });
   }, delay);
 }
@@ -150,8 +144,8 @@ async function startBot(workspaceIdOrOnReady, onReadyArg) {
     return runtime.socket;
   }
 
-  if (runtime.socket && runtime.socket.user) {
-    logger.debug("Bot already connected; skipping duplicate start request.");
+  if (runtime.socket) {
+    logger.debug("Bot connection already exists; skipping duplicate start request.");
     return runtime.socket;
   }
 
@@ -203,7 +197,6 @@ async function startBot(workspaceIdOrOnReady, onReadyArg) {
 
     sock.ev.on("connection.update", async (update) => {
     const { connection, qr, lastDisconnect } = update;
-
     if (runtime.generation !== generation) {
       await cleanupSocket(sock);
       return;
@@ -221,16 +214,13 @@ async function startBot(workspaceIdOrOnReady, onReadyArg) {
     if (connection === "close") {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const isConnectionReplaced = statusCode === DisconnectReason.connectionReplaced;
-      const shouldReconnect = shouldAttemptReconnect(statusCode, isConnectionReplaced);
-      const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === DisconnectReason.forbidden;
+      const shouldReconnect = shouldAttemptReconnect(statusCode, isConnectionReplaced, runtime.attempts);
 
       logger.warn(
         { statusCode, shouldReconnect, reconnectAttempts: runtime.attempts, isConnectionReplaced, workspaceId },
         isConnectionReplaced
-          ? "Connection replaced by another WhatsApp session. Stopping auto-reconnect."
-          : shouldReconnect
-            ? "Connection closed. Attempting recovery..."
-            : "WhatsApp session is no longer authorized. Manual relinking is required."
+          ? "Connection replaced by another WhatsApp session. Stopping auto-reconnect to avoid a loop."
+          : "Connection closed. Attempting recovery..."
       );
 
       // Cleanup the failed socket
@@ -239,21 +229,21 @@ async function startBot(workspaceIdOrOnReady, onReadyArg) {
       runtime.socket = null;
 
       if (isConnectionReplaced) {
-        const reason = "Another WhatsApp Web session replaced this connection. Close the other session, then reconnect from the dashboard.";
-        logger.error(reason);
-        bus.emit("bot:relink_required", { workspaceId, reason });
+        logger.error("Another active WhatsApp session was detected. Please log out from other devices and re-run the QR link process.");
+        bus.emit("bot:disconnected", { workspaceId });
         runtime.attempts = 0;
         return;
       }
 
       if (shouldReconnect) {
         scheduleReconnect(workspaceId, onReady, runtime, generation);
+      } else if (runtime.attempts >= MAX_RECONNECT_ATTEMPTS) {
+        logger.error("Max reconnection attempts reached. Please restart the bot.");
+        bus.emit("bot:disconnected", { workspaceId });
+        runtime.attempts = 0;
       } else {
-        const reason = isLoggedOut
-          ? "WhatsApp logged out or rejected this linked session. Credentials were kept; reconnect from the dashboard and scan a new QR code if prompted."
-          : "WhatsApp session is no longer valid. Reconnect from the dashboard and scan a new QR code if prompted.";
-        logger.error(reason);
-        bus.emit("bot:relink_required", { workspaceId, reason });
+        logger.error("Logged out from WhatsApp. Delete the ./auth folder and re-scan the QR code to reconnect.");
+        bus.emit("bot:logged_out", { workspaceId });
         runtime.attempts = 0;
       }
     } else if (connection === "open") {
@@ -269,13 +259,13 @@ async function startBot(workspaceIdOrOnReady, onReadyArg) {
     sock.ev.on("creds.update", saveCreds);
 
     return sock;
-  } catch (err) {
+  } catch (error) {
     if (runtime.generation === generation) {
       runtime.socket = null;
-      logger.error({ err: err.message, stack: err.stack, workspaceId }, "WhatsApp socket startup failed; scheduling a retry");
+      logger.error({ err: error.message, stack: error.stack, workspaceId }, "WhatsApp socket startup failed");
       scheduleReconnect(workspaceId, onReady, runtime, generation);
     }
-    throw err;
+    throw error;
   } finally {
     runtime.starting = false;
   }
@@ -302,12 +292,11 @@ async function stopWorkspace(workspaceId) {
 
 module.exports = {
   startBot,
-  cancelReconnect,
-  stopWorkspace,
   messageStore: getMessageStore(ADMIN_WORKSPACE_ID),
   getMessageStore,
   cleanupSocket,
+  cancelReconnect,
+  stopWorkspace,
   shouldAttemptReconnect,
-  getReconnectDelay,
   getSocket: (workspaceId) => runtimes.get(workspaceId)?.socket || null,
 };

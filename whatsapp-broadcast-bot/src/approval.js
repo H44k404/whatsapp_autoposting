@@ -12,7 +12,8 @@ const {
 } = require("./store");
 const { classifyReply, describeMedia } = require("./ollama");
 const { broadcastToGroups, broadcastRawMedia, loadGroups, getGroupName } = require("./broadcaster");
-const { extractLinkPreview, restoreMessageBuffers } = require("./utils/linkPreview");
+const { extractLinkPreview, createLinkPreviewMessage, extractMessageThumbnail } = require("./utils/linkPreview");
+const { getBroadcastHistory, deleteBroadcast } = require("./broadcastHistory");
 const logger = require("./utils/logger");
 const bus = require("./events");
 
@@ -30,6 +31,7 @@ function getControlChat(workspaceId) {
 
 // setTimeout handles for pending expirations, keyed by request id.
 const timeoutHandles = new Map();
+const pendingDeleteConfirmations = new Map();
 
 /**
  * Download media with retry logic
@@ -91,7 +93,7 @@ function extractThumbnailFromMessage(msg) {
 
 /**
  * Sends an approval-request DM to the control chat and stores the pending entry.
- * Downloads media previews or preserves a WhatsApp link preview for the dashboard.
+ * Also downloads a media preview for the dashboard and emits approval:new.
  */
 async function createApproval(sock, originalMsg, mediaType, caption) {
   const workspaceId = sock.workspaceId;
@@ -103,11 +105,11 @@ async function createApproval(sock, originalMsg, mediaType, caption) {
 
   const id = uuidv4().slice(0, 8);
   let description = caption || "";
-  const linkPreview = mediaType === "link" ? extractLinkPreview(originalMsg) : null;
   
   // Get the source group name for better logging/display
   const sourceGroupJid = originalMsg.key.remoteJid;
   const sourceGroupName = await getGroupName(sock, sourceGroupJid);
+  const linkPreview = mediaType === "link" ? extractLinkPreview(originalMsg) : null;
   const approvalChatIsSource = sourceGroupJid === CONTROL_CHAT;
 
   if (mediaType !== "link" && process.env.USE_OLLAMA === "true") {
@@ -131,61 +133,56 @@ async function createApproval(sock, originalMsg, mediaType, caption) {
     sourceGroupName,
   }, workspaceId);
 
-  // Forward the original message so Facebook video previews stay intact.
+  // Links already contain their preview metadata; media needs a local preview buffer.
   let mediaBuffer = null;
   let thumbnailBuffer = null;
   let previewBase64 = null;
 
   if (mediaType === "link") {
-    if (approvalChatIsSource) {
-      logger.info({ id, sourceGroupJid }, "Link preview is already in the approval chat; skipping duplicate forward");
-    } else {
+    thumbnailBuffer = extractMessageThumbnail(originalMsg);
+    if (thumbnailBuffer) {
+      saveMediaBuffer(id, thumbnailBuffer, "image", workspaceId);
+      previewBase64 = thumbnailBuffer.toString("base64");
+    }
+    if (!approvalChatIsSource) {
       try {
-        await sock.sendMessage(CONTROL_CHAT, {
-          forward: restoreMessageBuffers(originalMsg),
-          force: true,
-        });
-      } catch (e) {
+        await sock.sendMessage(CONTROL_CHAT, createLinkPreviewMessage(originalMsg));
+      } catch (error) {
         deletePending(id, workspaceId);
-        logger.error({ err: e.message, id }, "Failed to forward original link message");
-        throw e;
+        throw error;
       }
     }
   } else {
-    // Try to download full media first
     logger.info({ id, mediaType, attempt: 1 }, "Starting media download with retry logic...");
     mediaBuffer = await downloadMediaWithRetry(originalMsg, sock, 3);
 
     if (mediaBuffer) {
-      // Full media download succeeded
       saveMediaBuffer(id, mediaBuffer, mediaType, workspaceId);
       previewBase64 = mediaBuffer.toString("base64");
-      logger.info({ id, mediaType, size: mediaBuffer.length }, "✅ Media saved successfully (full download)");
+      logger.info({ id, mediaType, size: mediaBuffer.length }, "Media saved successfully (full download)");
     } else {
-      // Full media download failed, try to extract thumbnail
-      logger.warn({ id }, "⚠️  Could not download media, attempting to extract thumbnail from message...");
+      logger.warn({ id }, "Could not download media, attempting to extract thumbnail...");
       thumbnailBuffer = extractThumbnailFromMessage(originalMsg);
-
       if (thumbnailBuffer && thumbnailBuffer.length > 0) {
-        // Save thumbnail as preview
         saveMediaBuffer(id, thumbnailBuffer, "image", workspaceId);
         previewBase64 = thumbnailBuffer.toString("base64");
-        logger.info({ id, size: thumbnailBuffer.length }, "✅ Thumbnail extracted and saved as fallback preview");
+        logger.info({ id, size: thumbnailBuffer.length }, "Thumbnail extracted and saved as fallback preview");
       } else {
-        logger.error({ id }, "❌ Could not download media or extract thumbnail — dashboard preview will be unavailable");
+        logger.error({ id }, "Could not download media or extract thumbnail; dashboard preview is unavailable");
       }
     }
   }
 
+  const approvalDescription = linkPreview?.title
+    ? `Title: ${linkPreview.title}\n${linkPreview.url}`
+    : description;
   await sock.sendMessage(CONTROL_CHAT, {
     text:
       `🆕 New ${mediaType} received from *${sourceGroupName}*.\n` +
       `ID: *${id}*\n` +
-      (linkPreview?.title ? `Title: ${linkPreview.title}\n` : "") +
-      (linkPreview?.url && !approvalChatIsSource ? `Link: ${linkPreview.url}\n` : "") +
       (mediaType === "link" && approvalChatIsSource
         ? "The original link preview is already visible in this group.\n\n"
-        : `${description}\n\n`) +
+        : `${approvalDescription}\n\n`) +
       `Reply "YES ${id}" or "NO ${id}" to confirm.\n` +
       `(Or just reply YES/NO if this is the only pending item.)`,
   });
@@ -225,10 +222,143 @@ async function requestApproval(sock, originalMsg, mediaType, caption) {
     const id = await createApproval(sock, originalMsg, mediaType, caption);
     completeSourceMessage(sourceMessageId, sourceGroupJid, sock.workspaceId);
     return id;
-  } catch (e) {
+  } catch (error) {
     releaseSourceMessage(sourceMessageId, sourceGroupJid, sock.workspaceId);
-    throw e;
+    throw error;
   }
+}
+
+function isWhatsAppManagementCommand(text) {
+  return /^\/(?:help|groups|approve|sent|delete|confirm-delete)(?:\s|$)/i.test(String(text || "").trim());
+}
+
+function isPrivateControlChat(chatJid, controlChatJid) {
+  return chatJid === controlChatJid && typeof chatJid === "string" && chatJid.endsWith("@s.whatsapp.net");
+}
+
+function isAuthorizedControlChatSender(chatJid, controlChatJid, senderJid, ownerJid) {
+  if (chatJid !== controlChatJid) return false;
+  if (isPrivateControlChat(chatJid, controlChatJid)) return true;
+  if (!String(chatJid || "").endsWith("@g.us") || !ownerJid) return false;
+  const senders = Array.isArray(senderJid) ? senderJid : [senderJid];
+  return senders.includes(ownerJid);
+}
+
+function parseApprovalCommand(text, targetGroups) {
+  const parts = String(text || "").trim().split(/\s+/);
+  const id = (parts[1] || "").toLowerCase();
+  if (!/^[a-f0-9]{8}$/.test(id)) return { id, options: {}, error: "Usage: /approve <id> groups=1,3 [compress=auto|on|off] [delay=8-300]" };
+
+  const values = {};
+  for (const part of parts.slice(2)) {
+    const match = part.match(/^([a-z]+)=(.+)$/i);
+    if (!match) return { id, options: {}, error: `Invalid option: ${part}` };
+    const key = match[1].toLowerCase();
+    if (!["groups", "compress", "delay"].includes(key)) return { id, options: {}, error: `Unknown option: ${key}` };
+    if (Object.prototype.hasOwnProperty.call(values, key)) return { id, options: {}, error: `Duplicate option: ${key}` };
+    values[key] = match[2].toLowerCase();
+  }
+
+  if (!values.groups) return { id, options: {}, error: "Choose destinations with groups=1,3 or groups=all." };
+  const configuredGroups = (targetGroups || []).filter(Boolean);
+  let customGroups;
+  if (values.groups === "all") {
+    customGroups = configuredGroups;
+  } else {
+    const indexes = values.groups.split(",");
+    if (!indexes.every((value) => /^\d+$/.test(value))) return { id, options: {}, error: "Group indexes must be comma-separated numbers." };
+    const uniqueIndexes = [...new Set(indexes.map(Number))];
+    if (uniqueIndexes.some((index) => index < 1 || index > configuredGroups.length)) {
+      return { id, options: {}, error: "One or more group indexes are out of range." };
+    }
+    customGroups = uniqueIndexes.map((index) => configuredGroups[index - 1]);
+  }
+  if (!customGroups.length) return { id, options: {}, error: "No destination groups are configured." };
+
+  const options = { customGroups, delayMs: 8000 };
+  if (values.compress && values.compress !== "auto") {
+    if (!["on", "off"].includes(values.compress)) return { id, options: {}, error: "compress must be auto, on, or off." };
+    options.compressVideo = values.compress === "on";
+  }
+  if (values.delay !== undefined) {
+    const delaySeconds = Number(values.delay);
+    if (!Number.isInteger(delaySeconds) || delaySeconds < 8 || delaySeconds > 300) {
+      return { id, options: {}, error: "Delay must be between 8 and 300 seconds." };
+    }
+    options.delayMs = delaySeconds * 1000;
+  }
+  return { id, options };
+}
+
+async function handleManagementCommand(sock, cleaned, workspaceId, controlChat) {
+  if (/^\/help$/i.test(cleaned)) {
+    await sock.sendMessage(controlChat, { text: "/groups — list destinations\n/approve <id> groups=1,3 [compress=auto|on|off] [delay=8-300]\n/sent — show recent broadcasts\n/delete <broadcast-id> — request deletion\n/confirm-delete <broadcast-id> — confirm deletion" });
+    return true;
+  }
+  if (/^\/groups$/i.test(cleaned)) {
+    const groups = loadGroups(workspaceId);
+    const targets = (groups.targetGroups || []).filter(Boolean);
+    const text = targets.length
+      ? `Destination groups:\n${targets.map((jid, index) => `${index + 1}. ${jid}`).join("\n")}`
+      : "No destination groups are configured.";
+    await sock.sendMessage(controlChat, { text });
+    return true;
+  }
+  if (/^\/approve(?:\s|$)/i.test(cleaned)) {
+    const groups = loadGroups(workspaceId);
+    const parsed = parseApprovalCommand(cleaned, groups.targetGroups || []);
+    if (parsed.error) {
+      await sock.sendMessage(controlChat, { text: parsed.error });
+      return true;
+    }
+    const entry = getPending(parsed.id, workspaceId);
+    if (!entry || entry.status !== "pending") {
+      await sock.sendMessage(controlChat, { text: `Pending approval ${parsed.id} was not found.` });
+      return true;
+    }
+    await resolveApproval(sock, parsed.id, "yes", { ...parsed.options, workspaceId });
+    return true;
+  }
+  if (/^\/sent$/i.test(cleaned)) {
+    const broadcasts = getBroadcastHistory(workspaceId).slice(0, 5);
+    const text = broadcasts.length
+      ? `Recent broadcasts:\n${broadcasts.map((item) => `${item.id} — ${item.mediaType} — ${new Date(item.createdAt).toLocaleString()}`).join("\n")}`
+      : "No tracked broadcasts yet.";
+    await sock.sendMessage(controlChat, { text });
+    return true;
+  }
+  const deleteMatch = cleaned.match(/^\/delete\s+([a-f0-9-]+)$/i);
+  if (deleteMatch) {
+    const broadcastId = deleteMatch[1];
+    const found = getBroadcastHistory(workspaceId).some((item) => item.id === broadcastId);
+    if (!found) {
+      await sock.sendMessage(controlChat, { text: "Broadcast not found." });
+      return true;
+    }
+    pendingDeleteConfirmations.set(`${workspaceId}:${broadcastId}`, Date.now() + 2 * 60 * 1000);
+    await sock.sendMessage(controlChat, { text: `This will remove tracked copies only, not the source group. Confirm with /confirm-delete ${broadcastId} within 2 minutes.` });
+    return true;
+  }
+  const confirmMatch = cleaned.match(/^\/confirm-delete\s+([a-f0-9-]+)$/i);
+  if (confirmMatch) {
+    const broadcastId = confirmMatch[1];
+    const confirmationKey = `${workspaceId}:${broadcastId}`;
+    const expiresAt = pendingDeleteConfirmations.get(confirmationKey);
+    pendingDeleteConfirmations.delete(confirmationKey);
+    if (!expiresAt || expiresAt < Date.now()) {
+      await sock.sendMessage(controlChat, { text: "Deletion confirmation is missing or expired. Use /delete first." });
+      return true;
+    }
+    const groups = loadGroups(workspaceId);
+    const result = await deleteBroadcast(sock, broadcastId, workspaceId, groups.mainGroup);
+    if (!result) {
+      await sock.sendMessage(controlChat, { text: "Broadcast not found." });
+      return true;
+    }
+    await sock.sendMessage(controlChat, { text: `Deletion finished: removed from ${result.deleted} group(s); ${result.failed} failed; ${result.skipped} source group(s) skipped.` });
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -240,6 +370,10 @@ async function handleControlReply(sock, text) {
   const CONTROL_CHAT = getControlChat(workspaceId);
   const cleaned = (text || "").trim();
   if (!cleaned) return;
+  if (isWhatsAppManagementCommand(cleaned)) {
+    await handleManagementCommand(sock, cleaned, workspaceId, CONTROL_CHAT);
+    return;
+  }
 
   const match = cleaned.match(/([a-f0-9]{8})/i);
   let id = match ? match[1].toLowerCase() : null;
@@ -324,4 +458,12 @@ async function resolveApproval(sock, id, decision, options = {}) {
   deletePending(id, workspaceId);
 }
 
-module.exports = { requestApproval, handleControlReply, resolveApproval };
+module.exports = {
+  requestApproval,
+  handleControlReply,
+  resolveApproval,
+  isWhatsAppManagementCommand,
+  isPrivateControlChat,
+  isAuthorizedControlChatSender,
+  parseApprovalCommand,
+};

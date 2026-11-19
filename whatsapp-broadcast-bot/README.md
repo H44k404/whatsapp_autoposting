@@ -67,7 +67,8 @@ npm run discover-groups
 ### 3. Configure `.env`
 Copy `.env.example` → `.env` if you haven't already, and fill in:
 ```env
-CONTROL_CHAT_JID=947XXXXXXXX@s.whatsapp.net
+CONTROL_CHAT_JID=your-private-control-jid-or-group-jid
+CONTROL_OWNER_JID=947XXXXXXXX@s.whatsapp.net
 MAIN_GROUP_JID=xxxxxxxxxx@g.us
 DASHBOARD_USERNAME=replace-with-your-username
 DASHBOARD_PASSWORD=replace-with-a-strong-password
@@ -146,10 +147,17 @@ pm2 logs whatsapp-broadcast-bot --nostream   # check logs without blocking
    (Or just reply YES/NO if this is the only pending item.)
    ```
    For a URL, the bot also sends the original preview card to the control chat so you can review it before approving.
-3. Reply `YES <id>` to broadcast it to all target groups, or `NO <id>` to discard it.
+3. Reply `YES <id>` to broadcast it to all target groups, or `NO <id>` to discard it. For safer WhatsApp-side recipient selection, use `/groups`, then `/approve <id> groups=1,3 compress=auto delay=8`. The WhatsApp command requires an explicit recipient list and uses an 8-second minimum gap.
 4. If multiple approvals are pending at once, you'll be asked to include the explicit ID — always safe to do this regardless.
 5. If you don't reply within `APPROVAL_TIMEOUT_MINUTES`, the request auto-expires and nothing is sent.
-6. Bot-sent copies are automatically removed from broadcast groups 48 hours after sending, leaving a buffer before WhatsApp's usual Delete for Everyone time limit. The source group is never changed. You can also remove copies earlier from **Sent Posts**. Posts sent before message tracking was enabled cannot be removed because their message IDs were not recorded; failed automatic deletions remain visible in the dashboard for retry.
+6. Send `/help` in the configured control chat for the WhatsApp controls:
+   - `/groups` lists destination groups with indexes. `/approve <id> groups=1,3` sends only to the selected groups; use `groups=all` to include all configured destinations.
+   - Add `compress=auto`, `compress=on`, or `compress=off` to choose video handling for that approval. `auto` keeps the existing size-based behavior; `on` attempts compression for each video unless the global `ENABLE_VIDEO_COMPRESSION=false` safety switch is set.
+   - Add `delay=8` to choose a gap in seconds. WhatsApp commands allow 8–300 seconds; if omitted, the gap is 8 seconds.
+   - `/sent` lists the five latest tracked broadcasts. `/delete <broadcast-id>` asks for confirmation; send `/confirm-delete <broadcast-id>` within two minutes to try deleting tracked copies. The source group is never deleted. WhatsApp may reject a deletion or the message may be untracked.
+   - In a private control DM, the configured chat JID is the authorization boundary. For a control group, set `CONTROL_OWNER_JID` in `.env` to the owner's full WhatsApp JID (for example `947XXXXXXXX@s.whatsapp.net`); only that participant can approve/reject media or run management commands. Without it, group control messages fail closed. Keep this value private and restart the bot after setting it.
+   - Commands do not change the saved destination groups or dashboard settings. Existing `YES`/`NO` replies and the web dashboard continue to work.
+7. Bot-sent copies are automatically removed from broadcast groups 48 hours after sending, leaving a buffer before WhatsApp's usual Delete for Everyone time limit. The source group is never changed. You can also remove copies earlier from **Sent Posts** or with the two-step WhatsApp deletion command. Posts sent before message tracking was enabled cannot be removed because their message IDs were not recorded; failed automatic deletions remain visible in the dashboard for retry.
 
 ## Super Admin: Team Accounts
 - Open **Team** in the dashboard to create, enable, or disable worker accounts.
@@ -158,7 +166,7 @@ pm2 logs whatsapp-broadcast-bot --nostream   # check logs without blocking
 
 ## Known Limitations / Not Yet Implemented
 - **Vision-based captioning**: Ollama currently only summarizes the media's *caption text*, not the actual image/video pixels. Switching `OLLAMA_MODEL` to a vision model (e.g. `llava`) and passing image bytes as base64 would enable real visual captioning — not implemented here.
-- **Per-group selection**: Approval currently always broadcasts to *all* configured target groups. Selecting a subset (e.g. `YES a1b2c3d4 groups:1,2,5`) is not implemented.
+- **WhatsApp-side settings**: Group selection, compression, and delay can be chosen per approval in the control chat. Changing the saved group list or other persistent dashboard settings from WhatsApp is intentionally not supported.
 - **SQLite persistence**: Pending approvals use a flat JSON file, fine for low volume. Swap `src/store.js` for a SQLite-backed version if volume grows.
 - **Broadcast history**: The dashboard tracks message IDs for new broadcasts so bot-sent copies can be revoked in target groups. Older broadcasts sent before tracking was enabled cannot be removed through this feature.
 

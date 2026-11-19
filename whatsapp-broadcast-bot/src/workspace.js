@@ -2,10 +2,10 @@ const fs = require("fs");
 const path = require("path");
 
 const BOT_ROOT = path.join(__dirname, "..");
-const LEGACY_AUTH_DIR = path.join(BOT_ROOT, "auth");
+const LEGACY_AUTH_DIR = process.env.LEGACY_AUTH_DIR || path.join(BOT_ROOT, "auth");
 const LEGACY_CONFIG_PATH = path.join(BOT_ROOT, "config", "groups.json");
 const LEGACY_DATA_DIR = path.join(BOT_ROOT, "data");
-const WORKSPACES_DIR = path.join(LEGACY_DATA_DIR, "workspaces");
+const WORKSPACES_DIR = process.env.WORKSPACES_DIR || path.join(LEGACY_DATA_DIR, "workspaces");
 const ADMIN_WORKSPACE_ID = "admin";
 
 function safeWorkspaceId(workspaceId) {

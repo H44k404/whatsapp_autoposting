@@ -5,7 +5,7 @@ const logger = require("./utils/logger");
 const bus = require("./events");
 const { getGroupName } = require("./utils/groupCache");
 const { compressVideo, resolveVideoThumbnail } = require("./utils/videoCompressor");
-const { extractLinkPreview, restoreMessageBuffers } = require("./utils/linkPreview");
+const { extractLinkPreview, createLinkPreviewMessage } = require("./utils/linkPreview");
 const { v4: uuidv4 } = require("uuid");
 const { recordBroadcastMessage } = require("./broadcastHistory");
 
@@ -39,10 +39,7 @@ function recordSentMessage(broadcastId, jid, groupName, sentMessage, metadata, w
   try {
     recordBroadcastMessage(broadcastId, jid, groupName, sentMessage, metadata, workspaceId);
   } catch (error) {
-    logger.error(
-      { err: error.message, broadcastId, jid, workspaceId },
-      "Message was sent but its broadcast history could not be saved"
-    );
+    logger.error({ err: error.message, broadcastId, jid, workspaceId }, "Message was sent but its broadcast history could not be saved");
   }
 }
 
@@ -58,6 +55,7 @@ function recordSentMessage(broadcastId, jid, groupName, sentMessage, metadata, w
 async function broadcastToGroups(sock, originalMsg, options = {}) {
   const groups = loadGroups(options.workspaceId || sock.workspaceId);
   const targetGroups = options.customGroups || groups.targetGroups || [];
+  const workspaceId = options.workspaceId || sock.workspaceId;
   const broadcastId = options.broadcastId || uuidv4();
   const metadata = {
     mediaType: options.mediaType || (extractLinkPreview(originalMsg) ? "link" : "media"),
@@ -72,33 +70,24 @@ async function broadcastToGroups(sock, originalMsg, options = {}) {
   const failed = [];
 
   if (extractLinkPreview(originalMsg)) {
-    const forwardedMessage = {
-      forward: restoreMessageBuffers(originalMsg),
-      force: true,
-    };
-    logger.info({ groupCount: targetGroups.filter(Boolean).length }, "Forwarding approved link with its original WhatsApp preview...");
-    bus.emit("broadcast:start", { workspaceId: options.workspaceId || sock.workspaceId, count: targetGroups.filter(Boolean).length });
-
+    const linkMessage = createLinkPreviewMessage(originalMsg);
+    bus.emit("broadcast:start", { workspaceId, count: targetGroups.filter(Boolean).length });
     for (const jid of targetGroups) {
-      if (!jid) continue;
+      if (!jid || jid === groups.mainGroup) continue;
       try {
         const groupName = await getGroupName(sock, jid);
-        const sentMessage = await sock.sendMessage(jid, forwardedMessage);
-        recordSentMessage(broadcastId, jid, groupName, sentMessage, metadata, options.workspaceId || sock.workspaceId);
-        logger.info(`✅ Sent link to ${groupName} (${jid})`);
+        const sentMessage = await sock.sendMessage(jid, linkMessage);
+        recordSentMessage(broadcastId, jid, groupName, sentMessage, metadata, workspaceId);
         sent.push(jid);
-        bus.emit("broadcast:sent", { workspaceId: options.workspaceId || sock.workspaceId, jid, groupName });
-      } catch (e) {
+        bus.emit("broadcast:sent", { workspaceId, jid, groupName });
+      } catch (error) {
         const groupName = await getGroupName(sock, jid);
-        logger.error({ err: e.message, jid }, `❌ Failed to forward link to ${groupName} (${jid})`);
-        failed.push({ jid, error: e.message });
-        bus.emit("broadcast:failed", { workspaceId: options.workspaceId || sock.workspaceId, jid, groupName, error: e.message });
+        failed.push({ jid, error: error.message });
+        bus.emit("broadcast:failed", { workspaceId, jid, groupName, error: error.message });
       }
       await delay(delayMs);
     }
-
-    logger.info({ sent: sent.length, failed: failed.length }, "Link broadcast complete");
-    bus.emit("broadcast:complete", { workspaceId: options.workspaceId || sock.workspaceId, sent: sent.length, failed: failed.length });
+    bus.emit("broadcast:complete", { workspaceId, sent: sent.length, failed: failed.length });
     return { sent, failed };
   }
 
@@ -137,7 +126,7 @@ async function broadcastToGroups(sock, originalMsg, options = {}) {
       if (!jid) continue;
       try {
         const sentMessage = await sock.sendMessage(jid, { forward: originalMsg, force: true });
-        recordSentMessage(broadcastId, jid, await getGroupName(sock, jid), sentMessage, metadata, options.workspaceId || sock.workspaceId);
+        recordSentMessage(broadcastId, jid, await getGroupName(sock, jid), sentMessage, metadata, workspaceId);
         sent.push(jid);
       } catch (forwardError) {
         failed.push({ jid, error: forwardError.message });
@@ -182,7 +171,7 @@ async function broadcastToGroups(sock, originalMsg, options = {}) {
       }
 
       const sentMessage = await sock.sendMessage(jid, sendParams);
-      recordSentMessage(broadcastId, jid, groupName, sentMessage, metadata, options.workspaceId || sock.workspaceId);
+      recordSentMessage(broadcastId, jid, groupName, sentMessage, metadata, workspaceId);
       logger.info(`✅ Sent to ${groupName} (${jid})`);
       sent.push(jid);
       bus.emit("broadcast:sent", { workspaceId: options.workspaceId || sock.workspaceId, jid, groupName });
@@ -207,6 +196,7 @@ async function broadcastToGroups(sock, originalMsg, options = {}) {
 async function broadcastRawMedia(sock, buffer, mediaType, caption, options = {}) {
   const groups = loadGroups(options.workspaceId || sock.workspaceId);
   const targetGroups = options.customGroups || groups.targetGroups || [];
+  const workspaceId = options.workspaceId || sock.workspaceId;
   const broadcastId = options.broadcastId || uuidv4();
   const metadata = { mediaType, caption: caption || "", approvalId: options.approvalId || null, sourceGroupJid: groups.mainGroup };
   const delayMs = options.delayMs !== undefined ? options.delayMs : (parseInt(process.env.BROADCAST_DELAY_MS, 10) || 8000);
@@ -246,7 +236,7 @@ async function broadcastRawMedia(sock, buffer, mediaType, caption, options = {})
       }
 
       const sentMessage = await sock.sendMessage(jid, sendParams);
-      recordSentMessage(broadcastId, jid, groupName, sentMessage, metadata, options.workspaceId || sock.workspaceId);
+      recordSentMessage(broadcastId, jid, groupName, sentMessage, metadata, workspaceId);
       logger.info(`✅ Sent to ${groupName} (${jid})`);
       sent.push(jid);
       bus.emit("broadcast:sent", { workspaceId: options.workspaceId || sock.workspaceId, jid, groupName });

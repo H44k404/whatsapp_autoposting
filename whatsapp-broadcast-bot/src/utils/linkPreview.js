@@ -73,6 +73,17 @@ function toThumbnailBuffer(thumbnail) {
   return null;
 }
 
+function extractMessageThumbnail(message) {
+  const content = unwrapMessage(restoreMessageBuffers(message));
+  const media = content.imageMessage || content.videoMessage || content.documentMessage || {};
+  const extended = content.extendedTextMessage || {};
+  const externalPreview = extended.contextInfo?.externalAdReply || {};
+
+  return [media.jpegThumbnail, extended.jpegThumbnail, externalPreview.thumbnail]
+    .map(toThumbnailBuffer)
+    .find(Boolean) || null;
+}
+
 function createLinkPreviewMessage(message) {
   const restoredMessage = restoreMessageBuffers(message);
   const content = unwrapMessage(restoredMessage);
@@ -87,16 +98,35 @@ function createLinkPreviewMessage(message) {
     title: extended.title || externalPreview.title || preview.url,
   };
   const description = extended.description || externalPreview.body || preview.description;
-  const thumbnail = [extended.jpegThumbnail, externalPreview.thumbnail]
-    .map(toThumbnailBuffer)
-    .find(Boolean);
+  const thumbnail = extractMessageThumbnail(restoredMessage);
   if (description) linkPreview.description = description;
   if (thumbnail) linkPreview.jpegThumbnail = thumbnail;
 
-  return {
+  if (
+    extended.thumbnailDirectPath &&
+    extended.mediaKey &&
+    extended.thumbnailSha256 &&
+    extended.thumbnailEncSha256
+  ) {
+    linkPreview.highQualityThumbnail = {
+      directPath: extended.thumbnailDirectPath,
+      mediaKey: extended.mediaKey,
+      mediaKeyTimestamp: extended.mediaKeyTimestamp,
+      fileSha256: extended.thumbnailSha256,
+      fileEncSha256: extended.thumbnailEncSha256,
+      width: extended.thumbnailWidth,
+      height: extended.thumbnailHeight,
+    };
+  }
+
+  const result = {
     text: extended.text || content.conversation || preview.url,
     linkPreview,
   };
+  if (externalPreview && Object.keys(externalPreview).length > 0) {
+    result.contextInfo = { externalAdReply: externalPreview };
+  }
+  return result;
 }
 
 module.exports = {
@@ -104,4 +134,5 @@ module.exports = {
   isSelfPostedLink,
   restoreMessageBuffers,
   createLinkPreviewMessage,
+  extractMessageThumbnail,
 };

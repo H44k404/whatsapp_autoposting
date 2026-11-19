@@ -22,6 +22,7 @@ const { ensureWorkspace, removeWorkspaceData, ADMIN_WORKSPACE_ID } = require("./
 const { downloadMediaMessage } = require("baileys");
 const { pool } = require("./db");
 const logger = require("./utils/logger");
+const { extractMessageThumbnail } = require("./utils/linkPreview");
 const {
   createUser,
   findActiveUser,
@@ -106,6 +107,7 @@ async function refreshGroupCache(sock) {
     participatingGroupsCache.set(workspaceId, { groups: participating, fetchedAt: Date.now() });
     return participating;
   } catch (e) {
+    // ignore
     return null;
   }
 }
@@ -150,12 +152,6 @@ function createServer(handleControlReplyFn, getSock, startWorkspaceFn = null) {
   function emitToWorkspace(workspaceId, event, payload) {
     for (const socket of io.sockets.sockets.values()) {
       if (workspaceIdForSocket(socket) === workspaceId) socket.emit(event, payload);
-    }
-  }
-
-  function disconnectWorkspace(workspaceId) {
-    for (const socket of io.sockets.sockets.values()) {
-      if (workspaceIdForSocket(socket) === workspaceId) socket.disconnect(true);
     }
   }
 
@@ -231,6 +227,12 @@ function createServer(handleControlReplyFn, getSock, startWorkspaceFn = null) {
 
   function getRequestSock(req) {
     return getSock(getWorkspaceId(req)) || getSocket(getWorkspaceId(req));
+  }
+
+  function disconnectWorkspace(workspaceId) {
+    for (const socket of io.sockets.sockets.values()) {
+      if (workspaceIdForSocket(socket) === workspaceId) socket.disconnect(true);
+    }
   }
 
   function requireCsrf(req, res, next) {
@@ -356,6 +358,7 @@ function createServer(handleControlReplyFn, getSock, startWorkspaceFn = null) {
 
       disconnectWorkspace(deletedUser.workspaceId);
       await stopWorkspace(deletedUser.workspaceId);
+      bus.emit("bot:workspace_deleted", { workspaceId: deletedUser.workspaceId });
       try {
         removeWorkspaceData(deletedUser.workspaceId);
       } catch (error) {
@@ -408,14 +411,9 @@ function createServer(handleControlReplyFn, getSock, startWorkspaceFn = null) {
 
   function extractThumbnail(v) {
     try {
-      let msg = v.mediaMessage && v.mediaMessage.message;
+      const msg = v.mediaMessage && v.mediaMessage.message;
       if (!msg) return null;
-      while (msg.ephemeralMessage?.message || msg.viewOnceMessage?.message) {
-        msg = msg.ephemeralMessage?.message || msg.viewOnceMessage?.message;
-      }
-      const inner = msg.imageMessage || msg.videoMessage || msg.documentMessage || msg.extendedTextMessage || null;
-      const externalPreview = inner?.contextInfo?.externalAdReply;
-      return normalizeThumbnail(inner?.jpegThumbnail || externalPreview?.thumbnail || null);
+      return normalizeThumbnail(extractMessageThumbnail(msg));
     } catch (_) { return null; }
   }
 
@@ -860,13 +858,12 @@ function createServer(handleControlReplyFn, getSock, startWorkspaceFn = null) {
     emitToWorkspace(workspaceId, "status:update", { status: "disconnected", qr: null, workspaceId });
   });
 
-  bus.on("bot:relink_required", ({ workspaceId = ADMIN_WORKSPACE_ID, reason } = {}) => {
+  bus.on("bot:logged_out", ({ workspaceId = ADMIN_WORKSPACE_ID } = {}) => {
     workspaceStatus.set(workspaceId, "disconnected");
     workspaceQr.delete(workspaceId);
-    addLog("bot:disconnected", { workspaceId, reason });
-    emitToWorkspace(workspaceId, "bot:disconnected", { workspaceId, reason });
+    addLog("bot:logged_out", {});
+    emitToWorkspace(workspaceId, "bot:logged_out", { workspaceId });
     emitToWorkspace(workspaceId, "status:update", { status: "disconnected", qr: null, workspaceId });
-    emitToWorkspace(workspaceId, "bot:relink_required", { workspaceId, reason });
   });
 
   bus.on("bot:connecting", ({ workspaceId = ADMIN_WORKSPACE_ID } = {}) => {
